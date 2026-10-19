@@ -87,7 +87,7 @@ configured source." with the `provider` and an error `code`:
 | `BUDGET_EXHAUSTED` | The request used its `MAX_SUBREQUESTS` allowance. |
 | `NETWORK_ERROR` | The connection failed before an HTTP response arrived. |
 | `CIRCUIT_OPEN` | The provider failed three times in a row and is skipped for 30–120 seconds in this isolate (logged once as "Media provider circuit opened after consecutive failures."). |
-| `PROVIDER_DISABLED` | A required secret is missing, or `WAIFU_PICS` is off. Logged at `debug` level, because Waifu.pics is off by default. |
+| `PROVIDER_DISABLED` | A required secret is missing, or `WAIFU_PICS` or `AHOTTIE` is off. Logged at `debug` level, because both are off by default. |
 
 ### N-SFW (ABD) failures
 
@@ -113,11 +113,13 @@ another." with its `code`.
 - **Hentai-cosplay-xxx (primary).** Several of its image servers answer `502`
   for every file. Each retry reads a new random feed page, which almost always
   lands on a working server.
-- **Ahottie (backup).** Its images are hosted on imgbox. In October 2026
-  imgbox answered every request with the same "Thumbnail Temporarily
-  Unavailable" picture, which is now rejected as `PLACEHOLDER_IMAGE`. Until
-  imgbox recovers, Ahottie cannot deliver anything, and `/cosplay` shows the
-  error embed on the rare occasions when the primary also fails.
+- **Ahottie (fallback, off by default).** Its images are hosted on imgbox. In
+  October 2026 imgbox answered every request with the same "Thumbnail
+  Temporarily Unavailable" picture, which is rejected as `PLACEHOLDER_IMAGE`.
+  Ahottie is therefore skipped unless `AHOTTIE=true`, so `/cosplay` relies on
+  Hentai-cosplay-xxx alone and shows the error embed if all three of its
+  attempts fail. Turn Ahottie back on only once imgbox serves real images
+  again.
 
 If a host starts sending a new stand-in picture, add its byte size and SHA-256
 to `KNOWN_PLACEHOLDERS` in `src/brain/providers/http.js`:

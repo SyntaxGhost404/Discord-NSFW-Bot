@@ -88,7 +88,8 @@ image by magic bytes so block pages served as `200` are never uploaded. Only
 JPEG, PNG, GIF, and WebP are accepted, because Discord embeds only those.
 Downloads that match a known "image unavailable" placeholder are rejected,
 and `/cosplay` also requires at least 300 pixels in each direction, read from
-the image header. Its feeds retry with other images before falling back.
+the image header. It retries with other images, and its Ahottie fallback is
+off unless `AHOTTIE=true`.
 
 `ProviderCircuitBreaker` opens a provider after three consecutive failures for
 a random 30–120 seconds, then lets one real request probe it. Deadline and

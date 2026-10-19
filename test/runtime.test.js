@@ -27,6 +27,7 @@ describe('configuration', () => {
       mediaDeadlineMs: 24_000,
       maxMediaBytes: 10 * 1024 * 1024,
       waifuPicsEnabled: false,
+      ahottieEnabled: false,
       gateway: { mode: 'presence', intents: 0, shardCount: 1 },
     });
     expect(loadConfig(base)).toMatchObject({ publicKey: base.DISCORD_PUBLIC_KEY.toLowerCase(), gateway: { mode: 'full', intents: 4608 } });

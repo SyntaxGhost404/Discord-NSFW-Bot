@@ -99,6 +99,7 @@ export function loadConfig(env) {
     maxSubrequests: integerValue(text(env, 'MAX_SUBREQUESTS'), 45, { minimum: 10, maximum: 9_000 }),
     nekoBotAuthorization: text(env, 'NEKOBOT_AUTHORIZATION') || null,
     waifuPicsEnabled: booleanValue(text(env, 'WAIFU_PICS'), false),
+    ahottieEnabled: booleanValue(text(env, 'AHOTTIE'), false),
     premiumUserIds: snowflakeList(text(env, 'PREMIUM_USER_IDS'), 'PREMIUM_USER_IDS'),
     logLevel,
   });

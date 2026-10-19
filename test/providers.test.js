@@ -379,6 +379,12 @@ describe('cosplay feeds', () => {
     expect(extractAhottieMedia(html, 'https://ahottie.top/tags/Cosplay?page=1')).toEqual(['https://images2.imgbox.com/a6/e9/WWEJ8KMs_o.jpg']);
   });
 
+  it('leaves Ahottie untouched unless AHOTTIE is set', async () => {
+    const ctx = context([]);
+    await expect(fetchAhottie({}, ctx)).rejects.toMatchObject({ code: 'PROVIDER_DISABLED', provider: 'ahottie.top' });
+    expect(ctx.calls).toHaveLength(0);
+  });
+
   it('skips imgbox placeholders and tiny images using the page already read', async () => {
     const albums = ['A', 'B', 'C'].map((id) => `<a href="https://ahottie.top/albums/${id}"><img src="https://images2.imgbox.com/aa/bb/${id}_o.jpg"></a>`);
     const placeholder = imageBytes('image/jpeg', 1_200, { width: 240, height: 240 });
@@ -387,7 +393,7 @@ describe('cosplay feeds', () => {
       ['GET https://images2.imgbox.com/aa/bb/A_o.jpg', () => new Response(placeholder)],
       ['GET https://images2.imgbox.com/aa/bb/B_o.jpg', () => image('image/jpeg', 2_048, { width: 120, height: 900 })],
       ['GET https://images2.imgbox.com/aa/bb/C_o.jpg', () => image('image/jpeg', 2_048, { width: 900, height: 1_350 })],
-    ], { http: { placeholders: [{ bytes: 1_200, sha256: await sha256(placeholder) }] } });
+    ], { config: { ahottieEnabled: true }, http: { placeholders: [{ bytes: 1_200, sha256: await sha256(placeholder) }] } });
     const result = await fetchAhottie({}, ctx, { randomInteger: () => 1, choose: (items) => items[0] });
     expect(result).toMatchObject({ provider: 'ahottie.top', url: 'https://images2.imgbox.com/aa/bb/C_o.jpg', contentType: 'image/jpeg' });
     expect(ctx.calls).toHaveLength(4);

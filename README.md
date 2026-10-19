@@ -145,6 +145,7 @@ Variables (in `wrangler.jsonc` → `vars`):
 | `GATEWAY_ACTIVITY` | empty | Optional custom status text. |
 | `PREMIUM_USER_IDS` | empty | Comma-separated Premium user IDs. |
 | `WAIFU_PICS` | `false` | Enables the Waifu.pics sources. |
+| `AHOTTIE` | `false` | Enables Ahottie as the `/cosplay` fallback. Its images are hosted on imgbox, which currently serves only placeholders. |
 | `MEDIA_TIMEOUT_MS` | `10000` | Per-request provider timeout. |
 | `MEDIA_DEADLINE_MS` | `24000` | Total time for a media request, inside the 30 s `waitUntil()` window. |
 | `MAX_MEDIA_BYTES` | `10485760` | Largest re-uploaded file; a lower interaction `attachment_size_limit` wins. |

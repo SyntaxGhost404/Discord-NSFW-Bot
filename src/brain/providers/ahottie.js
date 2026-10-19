@@ -1,6 +1,6 @@
 import { ProviderEndpoint } from './manifest.js';
 import { mediaResult } from './media-result.js';
-import { providerError } from './errors.js';
+import { MediaProviderError, providerError } from './errors.js';
 import {
   AHOTTIE_HOST,
   ahottieMaximumPage,
@@ -10,9 +10,15 @@ import {
 
 const PROVIDER = 'ahottie.top';
 
-// Ahottie pages are over a megabyte, so a retry uses another image from the
-// page already parsed instead of reading a new one.
+// Ahottie's images are hosted on imgbox, which in October 2026 answered every
+// request with its "Thumbnail Temporarily Unavailable" placeholder, so the
+// source is off unless AHOTTIE is set. Its pages are over a megabyte, so a
+// retry uses another image from the page already parsed instead of reading a
+// new one.
 export async function fetchAhottie(_source, context, dependencies) {
+  if (!context.config.ahottieEnabled) {
+    throw new MediaProviderError('Ahottie is disabled by AHOTTIE.', { code: 'PROVIDER_DISABLED', provider: PROVIDER });
+  }
   try {
     const result = await fetchRandomCosplayAttachment({
       provider: PROVIDER,

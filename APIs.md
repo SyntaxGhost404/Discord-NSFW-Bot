@@ -210,9 +210,10 @@ as an attachment. Up to three pages are tried.
 
 ## Cosplay feeds
 
-`/cosplay` tries Hentai-cosplay-xxx first and Ahottie only if it fails. Both
-read the feed's page count, pick a random page, choose one image on it,
-download it, and upload it as an attachment. Gallery and album pages are never
+`/cosplay` uses Hentai-cosplay-xxx. Ahottie is a fallback that is off unless
+`AHOTTIE=true`, because its images are currently dead (see below). Both read
+the feed's page count, pick a random page, choose one image on it, download
+it, and upload it as an attachment. Gallery and album pages are never
 opened.
 
 Many album covers on both feeds are dead, so every download is checked before
@@ -259,10 +260,11 @@ over a megabyte of HTML.
 
 In October 2026 imgbox answered every tested image, thumbnail or original,
 with the same 8,091-byte, 240×240 "Thumbnail Temporarily Unavailable" JPEG,
-and `imgbox.com` itself reported "under heavy load". That image is the first
-entry in `KNOWN_PLACEHOLDERS`, so Ahottie now fails cleanly instead of
-posting it, and it starts working again by itself once imgbox serves real
-files.
+and `imgbox.com` itself reported "under heavy load". Ahottie is therefore
+disabled by default, the same way as Waifu.pics: while `AHOTTIE` is `false`,
+it is skipped without any request. If imgbox recovers, set `AHOTTIE` to
+`"true"` in `wrangler.jsonc` and redeploy. The placeholder is the first entry
+in `KNOWN_PLACEHOLDERS`, so it can never be posted even with Ahottie on.
 
 ## PornPics.com
 
@@ -309,7 +311,7 @@ is only reachable that way.
 | `/buttplug` | `style: Anime` | N-SFW `buttplug` |
 | `/buttplug` | `style: Real` | PornPics |
 | `/cages` | | N-SFW `cages` |
-| `/cosplay` | | Hentai-cosplay-xxx, then Ahottie |
+| `/cosplay` | | Hentai-cosplay-xxx, then Ahottie (off unless `AHOTTIE=true`) |
 | `/cum` | | Purrbot `cum/gif` |
 | `/ecchi` | | N-SFW `ecchi`, Waifu archive `ecchi` |
 | `/ero` | | Waifu archive `ero` |
