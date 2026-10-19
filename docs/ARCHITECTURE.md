@@ -1,175 +1,172 @@
 # Architecture
 
-## Startup
+The bot is one Cloudflare Worker (`src/index.js`) with two Durable Object
+classes and a cron trigger. All Discord traffic uses the raw HTTP API v10 and
+Gateway v10; no Discord client library is involved.
 
-`index.js` validates configuration, acquires an atomic single-instance lease,
-and starts `BotApplication`.
+```
+Discord ──HTTPS POST /interactions──▶ Worker fetch()
+                                        │ verify Ed25519, route
+                                        ├─ inline response (help, autocomplete, modal, invite, refusals)
+                                        └─ deferred response + ctx.waitUntil(task)
+                                              ├─ UserQuota DO (reserve → commit/rollback)
+                                              ├─ media providers (fetch, bounded)
+                                              └─ PATCH /webhooks/{app}/{token}/messages/@original
 
-1. `single-instance-lease.js` creates an owner-only lock with an atomic
-   create, local PID validation, stale-container recovery, and heartbeat.
-2. `command-loader.js` imports every command module and validates its public
-   Discord command shape.
-3. `command-registration.js` bulk-overwrites the configured global and/or test
-   guild command collection.
-4. `DiscordGatewayClient` calls `GET /gateway/bot` and opens Gateway v10.
-5. After `HELLO`, the client starts randomized heartbeats and sends `IDENTIFY`.
-6. Raw `INTERACTION_CREATE` and `MESSAGE_CREATE` dispatches are routed to the
-   corresponding brain modules.
+Cron (every minute) ──▶ Worker scheduled()
+                          ├─ sync application commands (once per isolate)
+                          └─ DiscordGateway DO per shard ──WebSocket──▶ Discord Gateway
+                                ├─ presence (online)
+                                └─ MESSAGE_CREATE exact mention ──▶ POST /channels/{id}/messages
+```
 
-There is no manual post-deployment registration command.
+## Request path
 
-## Discord transport
+`src/index.js` serves `GET /` (health text) and accepts interactions on
+`POST /interactions` (and `POST /`). `src/http/interactions.js`:
 
-`src/discord/rest-client.js` owns raw HTTP API v10 requests. It serializes calls
-per normalized route/major resource, learns shared bucket hashes from Discord,
-honors `retry_after` for 429 responses, and tracks global limits. POST requests
-use at-most-once delivery by default; idempotent methods retain bounded
-transient retries. Interaction/webhook tokens are replaced by one-way
-fingerprints in internal keys and redacted templates in logs and errors. The
-bot token is never sent to interaction webhook routes.
+1. Rejects the request with `401` unless `X-Signature-Ed25519` verifies over
+   the exact `X-Signature-Timestamp` + raw body bytes
+   (`src/http/signature.js`, Web Crypto `Ed25519`; the imported key is cached
+   per isolate).
+2. Parses the interaction and hands it to `InteractionRouter`.
+3. Returns the router's response body as JSON and passes any background task
+   to `ctx.waitUntil()`.
 
-`src/discord/gateway-client.js` owns the WebSocket lifecycle. It implements
-Gateway JSON payloads directly: heartbeat and ACK handling, sequence tracking,
-IDENTIFY, READY state, RESUME, RECONNECT, INVALID_SESSION, exponential
-reconnect delay, and fatal close-code handling. No compression is requested,
-so binary Gateway payloads are treated as a protocol error.
-
-## Terminal logging
-
-`src/lib/logger.js` provides one shared structured terminal format for every
-subsystem. Chalk assigns distinct portable ANSI styles to boot, event,
-success, informational, warning, error, and debug records. Child loggers retain
-their application/subsystem context, errors keep stack traces, Replit and TTY
-color support is detected automatically, and JSON output remains available
-for external log collectors.
-
-All terminal symbols, embed icons, button emojis, navigation glyphs, bullets,
-and custom Discord emoji strings come from `src/config/emojis.js`. Static and
-unit checks reject presentation glyphs anywhere else in the active source.
-
-On Replit, `scripts/start-with-logs.mjs` supervises `index.js`, mirrors raw
-stdout and stderr to the terminal, strips ANSI controls from the persisted
-copy, and appends it to `logs/discord-bot-console.txt`. The active file is never
-rotated implicitly, so terminal history is not discarded. `logs:export`
-creates point-in-time text snapshots without interrupting the bot.
+`src/runtime.js` builds the per-isolate objects once per `env`: config,
+structured logger, router, circuit breaker, quota client, and REST clients.
 
 ## Interaction routing
 
-The router handles command, component, autocomplete, and modal interaction
-types. Long-running media commands immediately send a deferred callback, then
-edit the original interaction response through the webhook endpoint. Refresh
-buttons encode only the command option state needed to reproduce a request.
+`src/brain/interaction-router.js` maps commands, components, autocomplete,
+and modals to the command modules in `src/commands/` (a static registry in
+`src/commands/index.js`, since Workers bundles have no filesystem). Commands
+return response descriptors from `src/discord/responses.js`:
 
-Initial callbacks use at-most-once semantics: the responder locks before the
-HTTP request begins and does not retry ambiguous transport or server failures.
-A bounded 15-minute interaction-ID cache suppresses replayed Gateway
-dispatches. Already-acknowledged and expired interaction codes are treated as
-terminal, while legacy `refresh_*` component IDs remain migration-compatible.
+- inline: `reply`, `ephemeral`, `updateMessage`, `modal`,
+  `autocompleteResult`;
+- deferred: `deferred(task)` for commands and `deferredUpdate(task)` for
+  components, where `task` runs after the acknowledgement.
 
-`InteractionConflictMonitor` uses callback state and elapsed time to separate a
-real three-second expiry from cross-process ownership races. An initial `40060`
-or two unusually early `10062` responses prove another live token consumer;
-the losing application enters the normal graceful shutdown path. This handles
-isolated hosts that cannot see the local single-instance lease and prevents an
-endless callback race.
+Before a command runs, the router applies the NSFW guard
+(`src/brain/nsfw-guard.js`) and the quota gate. Deferred tasks are wrapped so
+they never reject inside `waitUntil`: a failure edits the loading message into
+an error embed, and expired interactions are logged as warnings. Legacy
+`refresh_*` button IDs from the original bot still route to the right command
+and option.
 
-Guild media requests pass both Discord's command-level `nsfw` registration and
-a runtime channel check. Direct-message contexts preserve the original bot's
-behavior.
+Inline responses are processed by Discord after the HTTP reply arrives, so a
+very fast follow-up edit could reach Discord first. `InteractionWebhook`
+retries `10015`/`10008`/`404` for a few seconds after receipt to cover that
+window, and bounds each edit's timeout to the 30-second `waitUntil` window.
+Interaction webhooks never carry the bot token.
 
-## Account quotas
+## Media pipeline
 
-`GlobalRateLimiter` keys usage by Discord user ID only, so DMs, group DMs, and
-all guilds share one account quota. Free utility commands have a two-second
-cooldown; Premium utility commands have none. Free media has a rolling
-60-success window plus a 1,000-success UTC-day cap. Premium removes the minute
-limit and has a 5,000-success UTC-day cap.
+`src/brain/media-command.js` defines every media command from a declarative
+source list or option groups. A request:
 
-Media capacity is reserved before any provider request. A reservation commits
-only after the original Discord response is successfully edited with media;
-all provider, parsing, download, and Discord response failures roll it back.
-This provides concurrency safety without charging failed attempts. Successful
-usage is atomically persisted to the ignored `.runtime/` directory.
+1. picks the source pool (selected option group, a random group for `/solo`
+   and `/threesome`, or all groups) and shuffles it unless the command is
+   ordered (`/cosplay`);
+2. creates a `MediaHttpClient` (`src/brain/providers/http.js`) with a deadline
+   of `MEDIA_DEADLINE_MS` minus a 4-second upload reserve, a per-request
+   timeout, a byte ceiling (the smaller of `MAX_MEDIA_BYTES` and the
+   interaction's `attachment_size_limit`), and a subrequest budget of
+   `MAX_SUBREQUESTS` minus two;
+3. tries providers until one returns a usable result, skipping providers whose
+   circuit is open and stopping when the deadline or budget is exhausted;
+4. edits the original response with the embed, Refresh and Link buttons, and,
+   for downloaded media, a `multipart/form-data` upload referenced as
+   `attachment://media.<ext>`.
 
-`/premium` renders the current target snapshot with tier-aware Subscribe or
-Manage controls. Its emoji-only refresh component stores the target and
-original viewer IDs in a bounded custom ID, applies the normal utility
-cooldown, acknowledges with a deferred message update, and edits the same
-message from a new local quota snapshot.
+The HTTP client streams bodies with a running byte count (compressed bodies
+can inflate past `Content-Length`), validates hosts before and after
+redirects, distinguishes provider `TIMEOUT` from invocation
+`DEADLINE_EXCEEDED`, and, for downloads that will be embedded, identifies the
+image by magic bytes so block pages served as `200` are never uploaded. Only
+JPEG, PNG, GIF, and WebP are accepted, because Discord embeds only those.
 
-## Command brain
+`ProviderCircuitBreaker` opens a provider after three consecutive failures for
+a random 30–120 seconds, then lets one real request probe it. Deadline and
+budget exhaustion are neutral; the breaker lives in isolate memory, so each
+isolate learns independently.
 
-Each public command has its own file in `src/commands/`. Media command files
-explicitly declare their complete source lists and option groups. Shared
-execution mechanics—deferral, fallback, embeds, attachments, and refresh
-buttons—live in `media-command.js`.
+## Quotas
 
-This keeps category ownership visible without copying a large interaction
-implementation into every command.
+`UserQuota` (`src/durable/user-quota.js`) is one SQLite-backed Durable Object
+per Discord user ID, holding the state from
+`src/brain/rate-limit/quota-state.js`:
 
-## Provider brain
+- `reserveMedia` checks the minute window and UTC-day cap, counting pending
+  reservations, so concurrent requests cannot overshoot;
+- `commitMedia` charges a reservation once media was displayed;
+  `rollbackMedia` releases it on any failure; unclaimed reservations expire
+  after two minutes;
+- `consumeUtility` enforces the two-second free utility cooldown;
+- `snapshot` feeds `/premium`.
 
-Each provider has one transport/parser module in `src/brain/providers/`.
-Provider calls use bounded timeouts and download limits. A failed provider is
-logged and the command tries the next source in its own declared pool.
+The Worker decides Premium status from `PREMIUM_USER_IDS` and passes it in;
+time always comes from the object. `QuotaClient`
+(`src/brain/rate-limit/quota-client.js`) bounds each gate call to 1.5 seconds
+and fails open, so a slow quota store can never make Discord's three-second
+acknowledgement deadline fail.
 
-Provider pools are randomized by default to preserve legacy behavior. Commands
-that declare `orderedSources`, currently `/cosplay`, retain strict primary then
-fallback order. Its adapters dynamically discover the full feed depth, choose
-a fresh random page and feed item without persistent seed or offset state, and
-extract media directly from that feed. They never load gallery or album pages.
-Downloaded image bytes are re-uploaded as native Discord attachments while the
-Link button keeps the validated raw source URL.
+## Gateway Durable Object
 
-The `/buttplug` Real adapter is intentionally cover-feed-only. It discovers the
-PornPics item ceiling, chooses one fresh exact offset, and promotes the selected
-main thumbnail's CDN path to `/1280/` without opening a gallery. It downloads
-that one exact-host asset into bounded memory, rejects undersized or non-image
-responses and unsafe redirects, and uploads successful bytes as a native
-Discord attachment. The Link button keeps the validated raw `/1280/` URL. If
-the CDN returns a datacenter block page, the adapter fails closed and the
-normal command fallback may continue; the runtime does not add proxying, TLS
-impersonation, speculative probes, or background work. One immediate retry of
-the same media URL is permitted only after a transport-level `NETWORK_ERROR`;
-it never repeats feed discovery or retries a received response.
+Interactions arrive over HTTP, so the Gateway exists only for what HTTP cannot
+deliver: online presence and `MESSAGE_CREATE` for the exact-mention welcome
+reply. `DiscordGateway` (`src/durable/discord-gateway.js`) runs one instance
+per shard, named `shard-<id>-of-<count>`.
 
-Each provider also has an independent consecutive-failure circuit. It opens
-for a randomized 30–120 seconds after three failures. Once the interval
-elapses, only one genuine user request becomes a half-open probe; concurrent
-requests keep skipping that provider. Success closes the circuit and failure
-reopens it. No timer generates speculative network traffic.
+- **Start and keepalive.** The cron trigger calls `ensureRunning` on every
+  shard each minute. The object also sets a 30-second alarm that checks
+  liveness and reconnects if needed; both count as incoming events, which
+  keeps the object far inside the ~70-second idle eviction window.
+- **Connection.** It opens an outbound WebSocket with `fetch()` and
+  `Upgrade: websocket`, heartbeats on Discord's interval with initial jitter,
+  answers heartbeat requests, treats a missed ACK as a zombie connection, and
+  reconnects with exponential backoff.
+- **Resume.** Session ID, resume URL, and sequence are persisted (the sequence
+  every alarm and after each mention reply), so after a restart or deploy the
+  object resumes instead of identifying, and replayed events cannot trigger a
+  second reply. A resumable reconnect closes with code 4000, because 1000/1001
+  would invalidate the session.
+- **IDENTIFY budget.** Discord resets the bot token after 1,000 IDENTIFY calls
+  in 24 hours. The object refuses to identify after 50 per shard per day, or
+  when `GET /gateway/bot` reports fewer than 25 session starts remaining.
+- **Fatal codes.** 4004, 4010, 4011, 4012, 4013, and 4014 stop the shard and
+  are recorded with a fingerprint of the token, the intents, and the shard
+  count; changing any of those clears the stop automatically.
+- **Intents.** `GATEWAY_MODE=full` identifies with `GUILD_MESSAGES |
+  DIRECT_MESSAGES` (4608). Exact mentions carry their content without the
+  privileged `MESSAGE_CONTENT` intent. `presence` identifies with no intents.
 
-ABD intentionally reads only `url_japan` and contacts the exact Osaka hostname;
-the other response mirrors are ignored and there is no mirror fallback loop.
-That one exact hostname may tolerate `CERT_HAS_EXPIRED`, but the raw TLS socket
-must still pass hostname identity checking and may not report any other trust
-error. Successful bytes are uploaded as a Discord attachment and the upstream
-URL is not placed in the embed; the adjacent Link button opens the validated
-Osaka media URL directly.
+## Command registration
 
-`manifest.js` records endpoint templates and the complete Sex.com niche list.
-`APIs.md` records all active parameters and headers in human-readable form.
-`COMMAND_PARITY.md` records the archived command-to-provider audit.
+`src/brain/command-registration.js` builds the payload from the registry and
+compares it with Discord's copy field by field (ignoring server-side defaults
+such as IDs, versions, and null localizations). It bulk-overwrites only when
+they differ. The cron runs this once per isolate, so a deployment that
+changes commands is registered within a minute; `npm run register` does the
+same from the command line, and `--force` always overwrites.
 
-## Files and binary safety
+## Configuration and logging
 
-The runtime never writes downloaded media to disk. Buffers are held in memory
-only long enough to submit a multipart Discord response. `.gitignore` excludes
-media, archives, build output, caches, bytecode, crash files, and executable
-artifacts. `.gitattributes` marks source/document formats as text.
+`src/config.js` validates `env` once per binding object: snowflakes, the
+64-character public key, registration and Gateway modes, and clamped numeric
+limits. Legacy `DISCORD_CLIENT_ID`/`CLIENT_ID`/`BOT_TOKEN` names are still
+accepted.
 
-`scripts/check.mjs` rejects binary extensions and NUL bytes, checks Git's
-numstat for binary changes, verifies every archived file against the original
-commit, ensures the local `llms-full.txt` reference is untracked, and prevents
-high-level Discord wrappers from entering active code.
+`src/lib/logger.js` writes structured objects that Workers Logs indexes, with
+an indexed `kind` field (`boot`, `event`, `success`, …). Tokens in interaction
+and webhook paths, `Bot …` headers, and sensitive field names are redacted
+recursively, including inside errors.
 
-## Shutdown lifecycle
+## Files and safety
 
-SIGINT, SIGTERM, fatal Gateway state, uncaught exceptions, and unhandled
-rejections enter one idempotent shutdown path. The router first rejects new
-work, active requests receive a drain window, remaining provider I/O is
-cancelled, Discord responses receive a separate settle window, REST and
-Gateway transports close, and quota state flushes. A hard timeout force-closes
-both transports if any task refuses to settle. The runtime releases the process
-lease only after this sequence finishes, with an idempotent startup-failure
-fallback around the application lifecycle.
+Media is only ever held in memory for the length of one request. The runtime
+code under `src/` imports no Node built-ins and has no npm dependencies.
+`scripts/check.mjs` rejects Discord wrappers, Node imports in runtime code,
+presentation glyphs outside `src/config/emojis.js`, binary artifacts, tracked
+`.dev.vars`, and anything shaped like a bot token.

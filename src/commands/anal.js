@@ -9,7 +9,7 @@ export default defineMediaCommand({
   optionName: 'style',
   groups: {
     Anime: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/anal/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/anal/gif' },
       { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/anal' },
       { provider: 'nekobot', type: 'hentai_anal' },
       { provider: 'nekosv4', endpoint: 'https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags=anal' },

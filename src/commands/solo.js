@@ -17,11 +17,11 @@ export default defineMediaCommand({
   randomGroups: ['female', 'male', 'nekosv4'],
   groups: {
     female: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/solo/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/solo/gif' },
       { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/masturbation' },
     ],
     male: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/solo_male/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/solo_male/gif' },
     ],
     nekosv4: [
       { provider: 'nekosv4', endpoint: 'https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags=masturbating' },

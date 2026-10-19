@@ -9,7 +9,7 @@ export default defineMediaCommand({
   optionName: 'style',
   groups: {
     Anime: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/blowjob/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/blowjob/gif' },
       { provider: 'waifupics', endpoint: 'https://api.waifu.pics/nsfw/blowjob' },
       { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/blowjob' },
       { provider: 'waifuim', tag: 'oral', isNsfw: true },

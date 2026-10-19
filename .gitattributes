@@ -2,9 +2,9 @@
 *.cjs text eol=lf
 *.js text eol=lf
 *.json text eol=lf
+*.jsonc text eol=lf
 *.lock text eol=lf
 *.md text eol=lf
 *.mjs text eol=lf
-*.nix text eol=lf
 *.txt text eol=lf
-.replit text eol=lf
+.dev.vars.example text eol=lf

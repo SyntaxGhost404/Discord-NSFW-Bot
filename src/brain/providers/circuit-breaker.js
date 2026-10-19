@@ -3,11 +3,21 @@ import { MediaProviderError } from './errors.js';
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const DEFAULT_MINIMUM_OPEN_MS = 30_000;
 const DEFAULT_MAXIMUM_OPEN_MS = 120_000;
-const IGNORED_FAILURE_CODES = new Set([
-  'ABORTED',
+
+// The provider answered (or was never contacted because of local
+// configuration), so these outcomes count as healthy.
+const HEALTHY_FAILURE_CODES = new Set([
   'PROVIDER_DISABLED',
   'TOO_LARGE',
   'UNKNOWN_PROVIDER',
+]);
+
+// Local cancellation and per-invocation budgets say nothing about the
+// provider, so they leave its circuit untouched.
+const NEUTRAL_FAILURE_CODES = new Set([
+  'ABORTED',
+  'BUDGET_EXHAUSTED',
+  'DEADLINE_EXCEEDED',
 ]);
 
 function closedState() {
@@ -18,6 +28,9 @@ function closedState() {
   };
 }
 
+// Circuit state lives in isolate memory. Workers isolates are not shared, so
+// each isolate learns independently; that is acceptable because a circuit only
+// saves wasted upstream attempts and never affects correctness.
 export class ProviderCircuitBreaker {
   constructor({
     logger,
@@ -60,18 +73,18 @@ export class ProviderCircuitBreaker {
 
   failure(permit, error) {
     const state = this.#state(permit.provider);
-    state.probeInFlight = false;
-    if (IGNORED_FAILURE_CODES.has(error?.code)) {
-      if (error?.code !== 'ABORTED') this.success(permit);
+    if (HEALTHY_FAILURE_CODES.has(error?.code)) {
+      this.success(permit);
       return;
     }
+    if (permit.probe) state.probeInFlight = false;
+    if (NEUTRAL_FAILURE_CODES.has(error?.code)) return;
     state.failures += 1;
     if (permit.probe || state.failures >= this.failureThreshold) this.#open(permit.provider, state);
   }
 
   snapshot(provider) {
-    const state = this.#state(provider);
-    return Object.freeze({ ...state });
+    return Object.freeze({ ...this.#state(provider) });
   }
 
   #open(provider, state) {

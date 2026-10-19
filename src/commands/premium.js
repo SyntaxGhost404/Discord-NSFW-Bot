@@ -8,6 +8,7 @@ import { Emoji } from '../config/emojis.js';
 import { actionRow, button } from '../discord/components.js';
 import { ButtonStyle } from '../discord/constants.js';
 import { requester, resolvedUser } from '../discord/interaction-data.js';
+import { deferFor, ephemeral } from '../discord/responses.js';
 import { avatarUrl, displayName } from '../lib/discord-user.js';
 import { randomColor } from '../lib/random.js';
 
@@ -19,6 +20,9 @@ function number(value) {
 }
 
 function usageLimits(snapshot) {
+  if (!snapshot) {
+    return ['**Usage Limits**', 'Usage data is temporarily unavailable. Please try again shortly.'].join('\n');
+  }
   const minute = snapshot.minuteLimit === null
     ? 'Unlimited per min'
     : `${number(snapshot.minuteRemaining)} / ${number(snapshot.minuteLimit)} per min`;
@@ -109,8 +113,7 @@ function componentProfile(interaction, refresh) {
   };
 }
 
-function responseBody({ target, viewerId, footer, snapshot }) {
-  const premium = snapshot.premium;
+function responseBody({ target, viewerId, footer, premium, snapshot }) {
   return {
     embeds: [{
       title: premium ? 'Premium Plan ($1)' : 'Free Plan ($0)',
@@ -149,35 +152,37 @@ export default {
     })],
   }),
 
-  async execute(context, state = {}) {
+  execute(context, state = {}) {
     if (context.source === 'component') {
       const refresh = parseRefreshCustomId(state.customId);
-      if (!refresh) {
-        await context.responder.reply({ content: 'This Premium refresh button is no longer valid.', flags: 64 });
-        return;
-      }
-      await context.responder.deferUpdate();
-      const { target, footer } = componentProfile(context.interaction, refresh);
-      const snapshot = context.rateLimiter.snapshot(refresh.targetId);
-      await context.responder.editOriginal(responseBody({
-        target,
-        viewerId: refresh.viewerId,
-        footer,
-        snapshot,
-      }));
-      return;
+      if (!refresh) return ephemeral({ content: 'This Premium refresh button is no longer valid.' });
+      return deferFor('component', async () => {
+        const { target, footer } = componentProfile(context.interaction, refresh);
+        const snapshot = await context.quota.snapshot(refresh.targetId);
+        await context.webhook.editOriginal(responseBody({
+          target,
+          viewerId: refresh.viewerId,
+          footer,
+          premium: context.quota.isPremium(refresh.targetId),
+          snapshot,
+        }));
+        return {};
+      });
     }
 
-    await context.responder.defer();
-    const author = requester(context.interaction);
-    const target = resolvedUser(context.interaction, 'user');
-    const snapshot = context.rateLimiter.snapshot(target.id);
-    await context.responder.editOriginal(responseBody({
-      target,
-      viewerId: author.id,
-      footer: footerFor(target),
-      snapshot,
-    }));
+    return deferFor('command', async () => {
+      const author = requester(context.interaction);
+      const target = resolvedUser(context.interaction, 'user');
+      const snapshot = await context.quota.snapshot(target.id);
+      await context.webhook.editOriginal(responseBody({
+        target,
+        viewerId: author.id,
+        footer: footerFor(target),
+        premium: context.quota.isPremium(target.id),
+        snapshot,
+      }));
+      return {};
+    });
   },
 };
 

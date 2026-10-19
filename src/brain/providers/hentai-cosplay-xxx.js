@@ -19,6 +19,7 @@ export async function fetchHentaiCosplayXxx(_source, context, dependencies) {
       extractMedia: extractHentaiCosplayMedia,
       feedHosts: [HENTAI_HOST],
       mediaHosts: [HENTAI_HOST],
+      mediaReferer: `https://${HENTAI_HOST}/`,
     }, context, dependencies);
     return mediaResult({
       provider: PROVIDER,

@@ -1,0 +1,44 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "discord-nsfw-bot",
+	"main": "src/index.js",
+	// The newest date supported by the pinned Wrangler/workerd release.
+	"compatibility_date": "2026-10-12",
+	"workers_dev": true,
+	"preview_urls": false,
+	"observability": {
+		"enabled": true
+	},
+	// Every minute: keep the optional Gateway session alive and re-sync
+	// application commands after a deployment changes them.
+	"triggers": {
+		"crons": ["* * * * *"]
+	},
+	"durable_objects": {
+		"bindings": [
+			{ "name": "USER_QUOTA", "class_name": "UserQuota" },
+			{ "name": "GATEWAY", "class_name": "DiscordGateway" }
+		]
+	},
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["UserQuota", "DiscordGateway"] }
+	],
+	"version_metadata": {
+		"binding": "CF_VERSION_METADATA"
+	},
+	// Non-secret behaviour. Credentials are Worker secrets; see README.md.
+	"vars": {
+		"COMMAND_REGISTRATION_MODE": "global",
+		"TESTING_GUILD_ID": "",
+		"GATEWAY_MODE": "full",
+		"GATEWAY_SHARD_COUNT": "1",
+		"GATEWAY_ACTIVITY": "",
+		"PREMIUM_USER_IDS": "",
+		"WAIFU_PICS": "false",
+		"MEDIA_TIMEOUT_MS": "10000",
+		"MEDIA_DEADLINE_MS": "24000",
+		"MAX_MEDIA_BYTES": "10485760",
+		"MAX_SUBREQUESTS": "45",
+		"LOG_LEVEL": "info"
+	}
+}

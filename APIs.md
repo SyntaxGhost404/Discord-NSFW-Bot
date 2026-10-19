@@ -1,308 +1,306 @@
-# Active media APIs and exact contracts
+# Media providers
 
-This file records every endpoint, query parameter, header, category, and tag
-used by the original commands and retained in the rebuilt runtime. Provider
-selection is declared in each individual file under `src/commands/`; transport
-implementations live under `src/brain/providers/`.
+This file lists every provider endpoint, parameter, and header the bot uses,
+and which commands use them. Each media command declares its sources in its
+own module under `src/commands/`; the adapters live in `src/brain/providers/`.
 
-## 1. Purrbot
+## How requests run on Workers
 
-Method: `GET`. Response field: `link`.
+Every provider request goes through `MediaHttpClient`
+(`src/brain/providers/http.js`):
 
-- `https://purrbot.site/api/img/nsfw/anal/gif`
-- `https://purrbot.site/api/img/nsfw/blowjob/gif`
-- `https://purrbot.site/api/img/nsfw/cum/gif`
-- `https://purrbot.site/api/img/nsfw/fuck/gif`
-- `https://purrbot.site/api/img/nsfw/neko/gif`
-- `https://purrbot.site/api/img/nsfw/neko/img`
-- `https://purrbot.site/api/img/nsfw/pussylick/gif`
-- `https://purrbot.site/api/img/nsfw/solo/gif`
-- `https://purrbot.site/api/img/nsfw/solo_male/gif`
-- `https://purrbot.site/api/img/nsfw/threesome_fff/gif`
-- `https://purrbot.site/api/img/nsfw/threesome_ffm/gif`
-- `https://purrbot.site/api/img/nsfw/threesome_mmf/gif`
-- `https://purrbot.site/api/img/nsfw/yuri/gif`
+- **Time.** Each request has a timeout of `MEDIA_TIMEOUT_MS` (10 s by default).
+  The whole media request must finish within `MEDIA_DEADLINE_MS` (24 s) minus
+  4 s kept back for the Discord upload, inside the 30-second `waitUntil()`
+  window.
+- **Subrequests.** A media request may make `MAX_SUBREQUESTS` (45) outbound
+  fetches minus two kept back for Discord. The Free plan allows 50 per
+  invocation.
+- **Size.** Bodies are streamed with a running byte count: 1 MiB for JSON,
+  2 MiB for HTML (3 MiB for the cosplay feeds, 512 KiB for PornPics offset
+  JSON). Downloads are capped at the smaller of `MAX_MEDIA_BYTES` and the
+  interaction's `attachment_size_limit`.
+- **Hosts.** Where an adapter declares allowed hosts, they are checked before
+  the request and again after redirects.
+- **Images.** A download that will be uploaded must start with JPEG, PNG, GIF,
+  or WebP magic bytes, whatever its `Content-Type` says, because Discord embeds
+  only those formats. This also keeps HTML block pages served with status
+  `200` from being posted.
+- **Delivery.** URL results are put straight into the embed and Discord fetches
+  them. Downloaded results are uploaded with the edit as `media.<ext>` and
+  referenced as `attachment://media.<ext>`. The Link button always opens the
+  provider's URL.
+- **Credentials.** Only NekoBot and Waifu.im receive a secret, and only in
+  their own headers. Media hosts never receive credentials, and the Discord bot
+  token is never sent to a provider.
 
-## 2. N-SFW.COM (ABD)
+Failures fall through to the command's next source. See
+[docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md#a-media-command-shows-an-error)
+for the error codes.
 
-Method: `GET`. The adapter reads only the `url_japan` response field and ignores
-every other declared mirror. Media must be downloaded successfully from the
-exact Osaka host and is always re-uploaded as a native Discord attachment;
-Discord never renders the upstream URL directly inside the embed.
+## Purrbot
 
-Base: `https://api.n-sfw.com/nsfw/{category}`
+`GET https://api.purrbot.site/v2/img/nsfw/{category}/{format}`, embedded by
+URL. The response must have no `error` and a `link`. The original bot used the
+deprecated `https://purrbot.site/api/img/...` host; the paths are unchanged.
 
-Retained categories:
+Paths used: `anal/gif`, `blowjob/gif`, `cum/gif`, `fuck/gif`, `neko/gif`,
+`neko/img`, `pussylick/gif`, `solo/gif`, `solo_male/gif`,
+`threesome_fff/gif`, `threesome_ffm/gif`, `threesome_mmf/gif`, and
+`yuri/gif`.
 
-`anal`, `ass`, `blowjob`, `breeding`, `buttplug`, `cages`, `ecchi`, `feet`,
-`legs`, `masturbation`, `milf`, `neko`, `paizuri`, `petgirls`, `selfie`,
-`smothering`, `socks`, and `yuri`.
+## N-SFW.com (ABD)
 
-The Osaka route is restricted to the exact `n-sfw.ap-osaka-1.s3.ink` hostname,
-performs a separate certificate hostname check, and tolerates only Node's
-`CERT_HAS_EXPIRED` authorization result. Self-signed certificates, untrusted
-chains, hostname mismatches, redirects to undeclared hosts, and every other TLS
-error remain blocked. No credentials or Discord tokens are sent to media hosts,
-downloads remain size/time bounded, and the Link button points to the validated
-Osaka media URL.
+Base URL `https://api.n-sfw.com`. No API key.
 
-## 3. Waifu.im v7
+`GET /nsfw/{category}` returns one random image object (`type` is the
+category; uploads are limited to JPEG, PNG, and GIF):
 
-Method: `GET`.
+```json
+{
+  "uploaded": "2026-10-03T11:27:58.514Z",
+  "name": "a04f846ae997….png",
+  "original_name": "a04f846ae997….png",
+  "type": "{category}",
+  "nsfw": true,
+  "verified": true,
+  "sha256": "a04f846ae997…",
+  "mime": "image/png",
+  "size": 2555086,
+  "width": 1920,
+  "height": 1080,
+  "animated": false,
+  "file": "a04f846ae997….png",
+  "url": "https://data.n-sfw.com/nsfw/{category}/a04f846ae997….png"
+}
+```
 
-Endpoint: `https://api.waifu.im/images`
+The adapter (`src/brain/providers/abd.js`):
 
-Exact query parameters:
+- accepts the response only from `api.n-sfw.com`;
+- requires `url` to be plain HTTPS on exactly `data.n-sfw.com`, with a path
+  under `/nsfw/`;
+- rejects a `mime` Discord cannot embed, and a `size` above the download cap,
+  without downloading anything;
+- downloads the file from `data.n-sfw.com` only, within 6 s (or
+  `MEDIA_TIMEOUT_MS` if that is lower), and requires at least 1 KiB that
+  passes the image check;
+- uploads it as an attachment and gives the Link button the `data.n-sfw.com`
+  URL.
 
-- `IncludedTags={tag}`
-- `IsNsfw=True`
+Downloading rather than embedding the URL means a slow or failing image host
+is noticed in time to fall back, instead of producing an embed that never
+loads. The API's other endpoints (`/endpoints`, `/many/…`,
+`/many-optimized/…`, `/recent`, `/upload`) are not used.
 
-Exact headers:
+Categories used: `anal`, `ass`, `blowjob`, `breeding`, `buttplug`, `cages`,
+`ecchi`, `feet`, `legs`, `masturbation`, `milf`, `neko`, `paizuri`,
+`petgirls`, `selfie`, `smothering`, `socks`, and `yuri`.
 
-- `Authorization: ApiKey ${WAIFU_IM_KEY}`
-- `Accept-Version: v7`
+## Waifu.im
 
-Retained tags:
+`GET https://api.waifu.im/images?IncludedTags={tag}&IsNsfw=True` with
+`Accept-Version: v7`, embedded by URL from `items[0].url`. When
+`WAIFU_IM_KEY` is set, `Authorization: ApiKey {WAIFU_IM_KEY}` is added;
+anonymous requests also work.
 
-`ass`, `ecchi`, `ero`, `hentai`, `maid`, `milf`, `oppai`, `oral`, `paizuri`,
-`selfies`, `uniform`, and `waifu`.
+Tags used: `ass`, `ecchi`, `ero`, `hentai`, `maid`, `milf`, `oppai`, `oral`,
+`paizuri`, `selfies`, `uniform`, and `waifu`.
 
-Response path: `items[0].url`.
+## Waifu.pics
 
-## 4. Waifu.pics
+`GET https://api.waifu.pics/nsfw/{category}`, embedded by URL from `url`.
+Disabled unless `WAIFU_PICS=true`, as in the original deployment; disabled
+sources are skipped without a request.
 
-Method: `GET`. Response field: `url`. Disabled by default, matching the legacy
-Replit configuration; enable with `WAIFU_PICS=true`.
+Categories used: `blowjob`, `neko`, and `waifu`.
 
-- `https://api.waifu.pics/nsfw/blowjob`
-- `https://api.waifu.pics/nsfw/neko`
-- `https://api.waifu.pics/nsfw/waifu`
+## Sex.com
 
-## 5. Sex.com GIF search
-
-Method: `GET`.
-
-Endpoint: `https://www.sex.com/portal/api/gifs/search`
-
-Exact query parameters:
+`GET https://www.sex.com/portal/api/gifs/search` with:
 
 - `sexual-orientation=straight`
 - `order=likeCount`
 - `search={random niche}`
-- `page={random integer from 1 through 10}`
+- `page={random 1–10}`
 - `limit=40`
+- `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36`
 
-The exact archived browser header is sent:
+A random item from `data` is used: its `uri`, with a final `.webp` changed to
+`.gif`, is appended to `https://imagex1.sx.cdn.live` and embedded by URL. The
+Link button opens `https://www.sex.com/pin/{id}/`.
 
-`User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36`
+Niches: `Amateur`, `Anal`, `Asian`, `Big Tits`, `Blonde`, `Blowjob`,
+`Brunette`, `Creampie`, `Cumshot`, `Hardcore`, `Latina`, `Lesbian`, `MILF`,
+`Masturbation`, `Threesome`, `Ass`, `BBW`, `BDSM`, `Double Penetration`,
+`Ebony`, `Female Ejaculation`, `Fisting`, `Footjob`, `Gangbang`, `Hairy`,
+`Handjob`, `Hentai`, `Lingerie`, `Public Sex`, `Pussy`, and `Toys`.
 
-A random item is selected from `data`; its `uri` has a terminal `.webp`
-changed to `.gif`, then is appended to `https://imagex1.sx.cdn.live`. The link
-button uses `https://www.sex.com/pin/{id}/`.
+## Oboobs.ru and Obutts.ru
 
-Retained niches:
+| | Oboobs | Obutts |
+| --- | --- | --- |
+| Random | `http://api.oboobs.ru/boobs/0/1/random/` | `http://api.obutts.ru/butts/0/1/random/` |
+| By ID | `http://api.oboobs.ru/boobs/get/{id}/` | `http://api.obutts.ru/butts/get/{id}/` |
+| Media | `http://media.oboobs.ru/{preview}` | `http://media.obutts.ru/{preview}` |
 
-`Amateur`, `Anal`, `Asian`, `Big Tits`, `Blonde`, `Blowjob`, `Brunette`,
-`Creampie`, `Cumshot`, `Hardcore`, `Latina`, `Lesbian`, `MILF`, `Masturbation`,
-`Threesome`, `Ass`, `BBW`, `BDSM`, `Double Penetration`, `Ebony`,
-`Female Ejaculation`, `Fisting`, `Footjob`, `Gangbang`, `Hairy`, `Handjob`,
-`Hentai`, `Lingerie`, `Public Sex`, `Pussy`, and `Toys`.
+The first array item supplies `id` and `preview`; the media URL is embedded
+directly. These services only offer plain HTTP. Nothing secret is sent.
 
-## 6. Oboobs.ru and Obutts.ru
+## NekoBot.xyz
 
-Method: `GET`.
+`GET https://nekobot.xyz/api/image?type={type}` with
+`Authorization: {NEKOBOT_AUTHORIZATION}`, embedded by URL from `message` when
+`success` is `true`. Without the secret, NekoBot sources are skipped.
 
-Oboobs:
+Types used: `4k`, `anal`, `ass`, `blowjob`, `boobs`, `feet`, `gonewild`,
+`hass`, `hboobs`, `hentai`, `hentai_anal`, `hkitsune`, `hmidriff`, `hthigh`,
+`hyuri`, `lewdneko`, `paizuri`, `pgif`, `pussy`, `tentacle`, and `thigh`.
 
-- Random: `http://api.oboobs.ru/boobs/0/1/random/`
-- By ID: `http://api.oboobs.ru/boobs/get/{id}/`
-- Media: `http://media.oboobs.ru/{preview}`
+## Nekos API v4
 
-Obutts:
+`GET https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags={tag}`,
+embedded by URL from `[0].url`.
 
-- Random: `http://api.obutts.ru/butts/0/1/random/`
-- By ID: `http://api.obutts.ru/butts/get/{id}/`
-- Media: `http://media.obutts.ru/{preview}`
+Tags used: `anal`, `catgirl`, `maid`, `masturbating`, `pussy`, `threesome`,
+and `yuri`.
 
-The first array item supplies `id` and `preview`. Plain HTTP is retained because
-it is part of the original provider contract; no credentials are sent.
+## Porngifs.com
 
-## 7. NekoBot.xyz
+`GET https://cdn.porngifs.com/img/{id}` with a random `id` from 1 to 39,239
+and the headers `Accept: image/*`, `Referer: https://porngifs.com/`, and a
+browser `User-Agent`. Only `cdn.porngifs.com` is allowed, the body must be
+over 1 KiB and pass the image check, and the file is uploaded as an
+attachment. Some IDs are gaps, so up to four IDs are tried; the provider stops
+early when the deadline or subrequest budget runs out.
 
-Method: `GET`.
+The original bot resolved `porngifs.com` and connected with a custom TLS
+server name. Workers `fetch` has no such option, and the CDN serves
+`cdn.porngifs.com` directly over HTTPS with a valid certificate, so the request
+is now a plain `fetch`.
 
-Endpoint: `https://nekobot.xyz/api/image?type={type}`
+## Porngifs.tv
 
-Header: `Authorization: ${NEKOBOT_AUTHORIZATION}`.
+`GET https://porngifs.tv/?action=ajax&mode=async&function=get_block&block_id=list_videos_most_recent_videos&sort_by=post_date&from={page}`
+with a random `page` from 1 to 2,603, `X-Requested-With: XMLHttpRequest`, and
+a browser `User-Agent`.
 
-Retained types:
+`data-webp` values ending in `.webp` or `.gif` are collected; the feed's
+`.webm` clips are ignored because Discord cannot embed them. One is chosen at
+random, downloaded from `porngifs.tv` or a subdomain, checked, and uploaded
+as an attachment. Up to three pages are tried.
 
-`4k`, `anal`, `ass`, `blowjob`, `boobs`, `feet`, `gonewild`, `hass`, `hboobs`,
-`hentai`, `hentai_anal`, `hkitsune`, `hmidriff`, `hthigh`, `hyuri`, `lewdneko`,
-`paizuri`, `pgif`, `pussy`, `tentacle`, and `thigh`.
+## Cosplay feeds
 
-The response must have `success=true`; media is read from `message`. The old
-hard-coded authorization value was not copied into active code. It remains in
-the byte-for-byte legacy archive and must now be supplied through the host's
-secret manager.
+`/cosplay` tries Hentai-cosplay-xxx first and Ahottie only if it fails. Both
+read the feed's page count, pick a random page, choose one image on it,
+download it, and upload it as an attachment. Gallery and album pages are never
+opened.
 
-## 8. Nekos API v4
+### Hentai-cosplay-xxx.com
 
-Method: `GET`.
+Feed: `https://hentai-cosplay-xxx.com/search/page/{page}/`.
 
-Endpoint template:
+The page count comes from the `a.last` pagination link, falling back to the
+highest page link. Images are taken only from `ul#image-list`, preferring
+`data-original`/`data-full`, then the largest `srcset` entry, then lazy and
+plain `src` attributes. `/p={width}/` and `/p={width}x{height}/` resize
+segments are removed. Only HTTPS images on `hentai-cosplay-xxx.com` and its
+subdomains are accepted. The download sends
+`Referer: https://hentai-cosplay-xxx.com/`, because the image CDN refuses
+hotlinks without it.
 
-`https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags={tag}`
+### Ahottie.top
 
-Exact parameters:
+Feed: `https://ahottie.top/tags/Cosplay?page={page}`.
 
-- `limit=1`
-- `rating=explicit,suggestive`
-- `tags={tag}`
+The page count is the highest `page=` value on the first page. Images are
+taken only from inside `/albums/…` links, scanning a bounded window after
+each link so that pages over a megabyte stay cheap on CPU. Imgbox thumbnails
+(`thumbsN.imgbox.com/…_t.jpg`) are promoted to their originals
+(`imagesN.imgbox.com/…_o.jpg`), and only Imgbox hosts are downloaded from.
 
-Retained tags: `anal`, `catgirl`, `maid`, `masturbating`, `pussy`, `threesome`,
-and `yuri`. Response path: `[0].url`.
+## PornPics.com
 
-## 9. Porngifs.com
+`/buttplug` with the Real style uses PornPics; Anime uses N-SFW `buttplug`.
+Without a style, both are tried in random order.
 
-Method: `GET` against media path `https://cdn.porngifs.com/img/{randomId}`.
-`randomId` is retained as an integer from 1 through 39,239. Up to 15 IDs are
-tried.
+1. `GET https://www.pornpics.com/butt-plug/` and read `P_MAX`, which counts
+   rotator pages of ten galleries each.
+2. Pick a random offset from `0` to `P_MAX * 10 - 1`. The first 20 offsets are
+   read from the cover images already on that page. Higher offsets, or a
+   missing cover, use one request to
+   `https://www.pornpics.com/butt-plug/?offset={offset}` and take `t_url_460`,
+   or else `t_url`, from the first JSON item.
+3. Accept only HTTPS covers on exactly `cdni.pornpics.com`, rewrite the
+   `/300/` or `/460/` size segment to `/1280/`, and download that with
+   `Referer: https://www.pornpics.com/butt-plug/`. A `NETWORK_ERROR` is retried
+   once on the same URL; nothing else is retried.
+4. Upload the image as an attachment; the Link button opens the `/1280/` URL.
 
-The original implementation's DNS/SNI route is retained without disabling
-certificate verification:
+Individual gallery pages are never requested. PornPics may refuse datacenter
+networks; the image check rejects block pages, and no proxy or workaround is
+used.
 
-- Resolve `porngifs.com`.
-- Connect to the resolved address using TLS `servername=cdn.porngifs.com`.
-- Request `/img/{randomId}`.
-- Send `Host: cdn.porngifs.com`.
-- Send `Referer: https://porngifs.com/`.
-- Send a browser-style `User-Agent` and `Accept: image/*`.
-- Accept only bounded payloads larger than 1 KiB and upload them as native
-  attachments.
+## Commands and their sources
 
-## 10. Porngifs.tv
+Sources are tried in random order until one works, except `/cosplay`, which
+keeps its order. When a style command (`style: Anime`/`Real`) is used without
+the option, the sources of both styles are combined. `/solo` and `/threesome`
+without an option pick one group at random, including a Nekos API group that
+is only reachable that way.
 
-Method: `GET`.
+| Command | Option | Sources |
+| --- | --- | --- |
+| `/4k` | | NekoBot `4k` |
+| `/anal` | `style: Anime` | Purrbot `anal/gif`, N-SFW `anal`, NekoBot `hentai_anal`, Nekos API `anal` |
+| `/anal` | `style: Real` | NekoBot `anal` |
+| `/ass` | `style: Anime` | N-SFW `ass`, Waifu.im `ass`, NekoBot `hass` |
+| `/ass` | `style: Real` | Obutts, NekoBot `ass` |
+| `/blowjob` | `style: Anime` | Purrbot `blowjob/gif`, Waifu.pics `blowjob`, N-SFW `blowjob`, Waifu.im `oral` |
+| `/blowjob` | `style: Real` | NekoBot `blowjob` |
+| `/boobs` | `style: Anime` | Waifu.im `oppai`, NekoBot `hboobs` |
+| `/boobs` | `style: Real` | Oboobs, NekoBot `boobs` |
+| `/breeding` | | N-SFW `breeding` |
+| `/buttplug` | `style: Anime` | N-SFW `buttplug` |
+| `/buttplug` | `style: Real` | PornPics |
+| `/cages` | | N-SFW `cages` |
+| `/cosplay` | | Hentai-cosplay-xxx, then Ahottie |
+| `/cum` | | Purrbot `cum/gif` |
+| `/ecchi` | | N-SFW `ecchi`, Waifu.im `ecchi` |
+| `/ero` | | Waifu.im `ero` |
+| `/feet` | `style: Anime` | N-SFW `feet` |
+| `/feet` | `style: Real` | NekoBot `feet` |
+| `/fuck` | | Purrbot `fuck/gif` |
+| `/gif` | | Sex.com, Porngifs.com, NekoBot `pgif`, Porngifs.tv |
+| `/gonewild` | | NekoBot `gonewild` |
+| `/hentai` | | Waifu.im `hentai`, NekoBot `hentai` |
+| `/kitsune` | | NekoBot `hkitsune` |
+| `/legs` | | N-SFW `legs` |
+| `/maid` | | Waifu.im `maid`, Nekos API `maid` |
+| `/midriff` | | NekoBot `hmidriff` |
+| `/milf` | | N-SFW `milf`, Waifu.im `milf` |
+| `/neko` | | Purrbot `neko/gif`, Purrbot `neko/img`, Waifu.pics `neko`, N-SFW `neko`, Nekos API `catgirl`, NekoBot `lewdneko` |
+| `/paizuri` | | N-SFW `paizuri`, Waifu.im `paizuri`, NekoBot `paizuri` |
+| `/petgirls` | | N-SFW `petgirls` |
+| `/pussy` | | Nekos API `pussy`, NekoBot `pussy` |
+| `/pussylick` | | Purrbot `pussylick/gif` |
+| `/selfie` | | N-SFW `selfie`, Waifu.im `selfies` |
+| `/smothering` | | N-SFW `smothering` |
+| `/socks` | | N-SFW `socks` |
+| `/solo` | `gender: female` | Purrbot `solo/gif`, N-SFW `masturbation` |
+| `/solo` | `gender: male` | Purrbot `solo_male/gif` |
+| `/solo` | none (random group) | Nekos API `masturbating` |
+| `/tentacle` | | NekoBot `tentacle` |
+| `/thigh` | `style: Anime` | NekoBot `hthigh` |
+| `/thigh` | `style: Real` | NekoBot `thigh` |
+| `/threesome` | `type: fff` | Purrbot `threesome_fff/gif` |
+| `/threesome` | `type: ffm` | Purrbot `threesome_ffm/gif` |
+| `/threesome` | `type: mmf` | Purrbot `threesome_mmf/gif` |
+| `/threesome` | none (random group) | Nekos API `threesome` |
+| `/uniform` | | Waifu.im `uniform` |
+| `/waifu` | | Waifu.pics `waifu`, Waifu.im `waifu` |
+| `/yuri` | | Purrbot `yuri/gif`, N-SFW `yuri`, NekoBot `hyuri`, Nekos API `yuri` |
 
-Endpoint:
-
-`https://porngifs.tv/?action=ajax&mode=async&function=get_block&block_id=list_videos_most_recent_videos&sort_by=post_date&from={randomPage}`
-
-Exact query parameters:
-
-- `action=ajax`
-- `mode=async`
-- `function=get_block`
-- `block_id=list_videos_most_recent_videos`
-- `sort_by=post_date`
-- `from={random integer from 1 through 2603}`
-
-Headers: `X-Requested-With: XMLHttpRequest` and a browser-style `User-Agent`.
-Up to 15 pages are tried. `data-webp` values ending in `.webp` or `.gif` are
-collected, one is selected randomly, downloaded within the active attachment
-limit, and uploaded using its real content type.
-
-## 11. Cosplay HTML feeds
-
-The `/cosplay` command uses an ordered provider pool. The primary provider is
-always attempted first; Ahottie is contacted only after a primary failure.
-Neither adapter opens an individual gallery or album page.
-
-### Hentai-cosplay-xxx.com (primary)
-
-Feed template:
-
-`https://hentai-cosplay-xxx.com/search/page/{page}/`
-
-On every command or Refresh execution, the adapter reads the current
-pagination ceiling from the feed's `a.last` link, generates a fresh
-cryptographically random page from the complete `1..maximum` range, and reads
-that feed page. Page 1 is reused when it is the randomly selected page.
-
-Only image/source elements inside `ul#image-list` are considered. The adapter
-never requests the `/image/...` gallery links. It removes `/p={width}/` and
-`/p={width}x{height}/` path wrappers, resolves protocol-relative CDN URLs,
-rejects non-HTTPS and foreign hosts, de-duplicates the resulting raw URLs, and
-selects uniformly from the complete candidate array.
-
-### Ahottie.top (fallback)
-
-Feed template:
-
-`https://ahottie.top/tags/Cosplay?page={page}`
-
-The maximum page is read dynamically from the index pagination on every
-fallback execution. A fresh page is selected across the complete range. Only
-image elements already contained by `/albums/...` links in the index payload
-are parsed; the album URLs themselves are never requested. Direct
-`imagesN.imgbox.com` URLs are accepted, while Imgbox thumbnail URLs are promoted
-from `thumbsN`/`_t` to their `imagesN`/`_o` originals.
-
-Both feeds and media downloads have host allowlists, shutdown-aware timeouts,
-and byte ceilings. The selected image is downloaded once, verified as an image,
-and uploaded as a native Discord attachment so the embed renders immediately.
-The Link button retains the resolved raw media URL. No browser automation,
-prefetching, speculative request, or background crawl is used.
-
-## 12. PornPics.com butt-plug cover feed
-
-The `/buttplug` command now exposes the same optional `style` choice as
-`/ass` and `/anal`. `Anime` selects only the retained N-SFW `buttplug`
-endpoint. `Real` selects only PornPics. With no selection, the shared command
-brain flattens and shuffles the two one-source groups, giving each source one
-equal first choice and preserving the established fallback behavior.
-
-Discovery endpoint:
-
-`https://www.pornpics.com/butt-plug/`
-
-The adapter reads `P_MAX` from the initial HTML and treats it as ten gallery
-items per rotator page. A fresh cryptographically random item offset is chosen
-from `0..(P_MAX * 10 - 1)` on every command or Refresh execution. For offsets
-below 20, the already-loaded main feed supplies the corresponding gallery
-thumbnail. Higher offsets use one bounded request to:
-
-`https://www.pornpics.com/butt-plug/?offset={offset}`
-
-The first JSON item at that exact offset supplies `t_url_460`, with `t_url` as
-the secondary field. The adapter never requests `g_url` or any individual
-gallery page. If an expected initial thumbnail is absent, the same exact-offset
-JSON route is used once instead.
-
-Only HTTPS image URLs on the exact `cdni.pornpics.com` host are accepted.
-`/300/` and `/460/` path prefixes are replaced with `/1280/` while all shard
-segments and the filename remain unchanged. The bot normally performs one
-bounded download from that exact CDN host with image-oriented request headers.
-If that media request fails with a transport-level `NETWORK_ERROR` before a
-usable response is received, the same selected URL is attempted once more;
-feed discovery, random selection, and offset JSON are not repeated.
-The response must meet the minimum-size check, declare a supported `image/*`
-content type, and finish on another valid HTTPS `/1280/` URL on the same exact
-host. The bytes stay in memory and are uploaded to Discord as a native
-attachment; the embed uses `attachment://media.<extension>`, while the Link
-button retains the selected raw `/1280/` URL.
-
-An HTTP 200 block page such as `text/html` is rejected as a provider failure
-instead of being sent to Discord as a blank image. HTTP responses, timeouts,
-shutdown cancellation, validation failures, and block pages are never retried.
-The adapter performs no proxying, TLS impersonation, speculative probe, or
-attempt to bypass the CDN's datacenter access policy. Feed and media responses
-remain host-allowlisted, shutdown-aware, and byte-bounded.
-
-## Command-to-provider preservation
-
-Every command source is explicit in its own module. The provider parity tests
-cover all of the categories above, including style/gender/type source groups.
-The `/gif` pool remains an equal top-level choice between Sex.com,
-Porngifs.com, NekoBot `pgif`, and Porngifs.tv before fallback is applied.
-
-`/cosplay` is a new active command rather than an archived provider mapping.
-The PornPics `Real` group is an intentional extension to the archived
-`/buttplug` command; its original N-SFW source remains unchanged in the
-`Anime` group. Both extensions have dedicated executable transport and command
-tests.
-
-The experimental endpoint studies in `archive/legacy/studies/` are preserved
-as research documents. They were not active command implementations in the old
-runtime and are therefore not silently promoted into production providers.
+`test/commands.test.js` asserts this exact mapping, and
+`npm run test:live` calls every distinct source for real.

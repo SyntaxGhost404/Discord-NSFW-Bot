@@ -2,6 +2,7 @@ import { commandData } from '../brain/command-schema.js';
 import { actionRow, button } from '../discord/components.js';
 import { BOT_INVITE_PERMISSIONS, ButtonStyle } from '../discord/constants.js';
 import { requester } from '../discord/interaction-data.js';
+import { reply } from '../discord/responses.js';
 import { avatarUrl, displayName } from '../lib/discord-user.js';
 import { randomColor } from '../lib/random.js';
 import { Emoji, uiText } from '../config/emojis.js';
@@ -20,10 +21,9 @@ export default {
     name: 'invite',
     description: 'Get a dynamic invite link to add this bot to your server.',
   }),
-  async execute(context) {
-    await context.responder.defer();
+  execute(context) {
     const user = requester(context.interaction);
-    await context.responder.editOriginal({
+    return reply({
       embeds: [{
         title: uiText(Emoji.ui.sparkle, 'Invite Me to Your Server'),
         description: 'Use the button below to authorize the bot with only the permissions required for replies, embeds, and media attachments.',
@@ -34,9 +34,8 @@ export default {
       components: [actionRow(button({
         label: uiText(Emoji.ui.add, 'Invite Bot'),
         style: ButtonStyle.LINK,
-        url: inviteUrl(context.config.clientId),
+        url: inviteUrl(context.config.applicationId ?? context.interaction.application_id),
       }))],
-      attachments: [],
     });
   },
 };

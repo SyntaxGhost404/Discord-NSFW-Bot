@@ -1,73 +1,130 @@
-import assert from 'node:assert/strict';
-import path from 'node:path';
-import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { loadCommands } from '../src/brain/command-loader.js';
-import { Logger } from '../src/lib/logger.js';
+import { describe, expect, it } from 'vitest';
+import { buildCommandRegistry, commands } from '../src/commands/index.js';
+import { providerNames } from '../src/brain/providers/index.js';
+import { SexComNiches } from '../src/brain/providers/manifest.js';
+import { mediaCustomId, parseMediaCustomId } from '../src/discord/interaction-data.js';
+import { levenshteinDistance } from '../src/commands/help.js';
 
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const commands = await loadCommands(path.join(root, 'src', 'commands'), new Logger('error'));
+function mediaSources(command) {
+  return [...(command.media.sources ?? []), ...Object.values(command.media.groups ?? {}).flat()];
+}
 
-const expectedPublicCommands = [
-  '4k', 'anal', 'ass', 'blowjob', 'boobs', 'breeding', 'buttplug', 'cages', 'cum',
-  'cosplay', 'ecchi', 'ero', 'feet', 'fuck', 'gif', 'gonewild', 'help', 'hentai', 'invite',
-  'kitsune', 'legs', 'maid', 'midriff', 'milf', 'neko', 'paizuri', 'petgirls',
-  'ping', 'premium', 'pussy', 'pussylick', 'selfie', 'smothering', 'socks', 'solo', 'tentacle',
-  'thigh', 'threesome', 'uniform', 'waifu', 'yuri',
-].sort();
+function descriptor(source) {
+  if (source.endpoint) return `${source.provider}:${source.endpoint}`;
+  if (source.type) return `${source.provider}:type=${source.type}`;
+  if (source.tag) return `${source.provider}:tag=${source.tag}`;
+  if (source.niches) return `${source.provider}:niches=${source.niches.length}`;
+  return source.provider;
+}
 
-test('the rebuilt command registry exposes all legacy commands plus active additions', () => {
-  const publicNames = [...commands.values()]
-    .filter((command) => !command.hidden)
-    .map((command) => command.data.name)
-    .sort();
-  assert.deepEqual(publicNames, expectedPublicCommands);
-  assert.equal(commands.size, 42, 'the registry also contains one hidden component handler');
-});
+const purr = (path) => `purrbot:https://api.purrbot.site/v2/img/nsfw/${path}`;
+const abd = (category) => `abd:https://api.n-sfw.com/nsfw/${category}`;
+const nekoBot = (type) => `nekobot:type=${type}`;
+const nekos = (tag) => `nekosv4:https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags=${tag}`;
+const waifuIm = (tag) => `waifuim:tag=${tag}`;
+const waifuPics = (category) => `waifupics:https://api.waifu.pics/nsfw/${category}`;
 
-test('every media command is age-restricted and available in the original contexts', () => {
-  const mediaCommands = [...commands.values()].filter((command) => command.kind === 'media');
-  assert.equal(mediaCommands.length, 37);
-  for (const command of mediaCommands) {
-    assert.equal(command.data.nsfw, true, command.data.name);
-    assert.deepEqual(command.data.integration_types, [0, 1], command.data.name);
-    assert.deepEqual(command.data.contexts, [0, 1, 2], command.data.name);
-    assert.equal(command.data.type, 1, command.data.name);
-  }
-});
+// The complete command-to-provider mapping, carried over from the previous
+// runtime with Purrbot moved to its non-deprecated v2 host.
+const expectedCommandSources = {
+  '4k': { all: [nekoBot('4k')] },
+  anal: { Anime: [purr('anal/gif'), abd('anal'), nekoBot('hentai_anal'), nekos('anal')], Real: [nekoBot('anal')] },
+  ass: { Anime: [abd('ass'), waifuIm('ass'), nekoBot('hass')], Real: ['obutts', nekoBot('ass')] },
+  blowjob: { Anime: [purr('blowjob/gif'), waifuPics('blowjob'), abd('blowjob'), waifuIm('oral')], Real: [nekoBot('blowjob')] },
+  boobs: { Anime: [waifuIm('oppai'), nekoBot('hboobs')], Real: ['oboobs', nekoBot('boobs')] },
+  breeding: { all: [abd('breeding')] },
+  buttplug: { Anime: [abd('buttplug')], Real: ['pornpics:https://www.pornpics.com/butt-plug/'] },
+  cages: { all: [abd('cages')] },
+  cosplay: { all: ['hentaicosplayxxx', 'ahottie'] },
+  cum: { all: [purr('cum/gif')] },
+  ecchi: { all: [abd('ecchi'), waifuIm('ecchi')] },
+  ero: { all: [waifuIm('ero')] },
+  feet: { Anime: [abd('feet')], Real: [nekoBot('feet')] },
+  fuck: { all: [purr('fuck/gif')] },
+  gif: { all: ['sexcom:niches=31', 'porngifs', nekoBot('pgif'), 'porngifstv'] },
+  gonewild: { all: [nekoBot('gonewild')] },
+  hentai: { all: [waifuIm('hentai'), nekoBot('hentai')] },
+  kitsune: { all: [nekoBot('hkitsune')] },
+  legs: { all: [abd('legs')] },
+  maid: { all: [waifuIm('maid'), nekos('maid')] },
+  midriff: { all: [nekoBot('hmidriff')] },
+  milf: { all: [abd('milf'), waifuIm('milf')] },
+  neko: { all: [purr('neko/gif'), purr('neko/img'), waifuPics('neko'), abd('neko'), nekos('catgirl'), nekoBot('lewdneko')] },
+  paizuri: { all: [abd('paizuri'), waifuIm('paizuri'), nekoBot('paizuri')] },
+  petgirls: { all: [abd('petgirls')] },
+  pussy: { all: [nekos('pussy'), nekoBot('pussy')] },
+  pussylick: { all: [purr('pussylick/gif')] },
+  selfie: { all: [abd('selfie'), waifuIm('selfies')] },
+  smothering: { all: [abd('smothering')] },
+  socks: { all: [abd('socks')] },
+  solo: { female: [purr('solo/gif'), abd('masturbation')], male: [purr('solo_male/gif')], nekosv4: [nekos('masturbating')] },
+  tentacle: { all: [nekoBot('tentacle')] },
+  thigh: { Anime: [nekoBot('hthigh')], Real: [nekoBot('thigh')] },
+  threesome: { fff: [purr('threesome_fff/gif')], ffm: [purr('threesome_ffm/gif')], mmf: [purr('threesome_mmf/gif')], nekosv4: [nekos('threesome')] },
+  uniform: { all: [waifuIm('uniform')] },
+  waifu: { all: [waifuPics('waifu'), waifuIm('waifu')] },
+  yuri: { all: [purr('yuri/gif'), abd('yuri'), nekoBot('hyuri'), nekos('yuri')] },
+};
 
-test('utility commands remain safe commands', () => {
-  for (const name of ['help', 'invite', 'ping', 'premium']) {
-    assert.equal(commands.get(name).data.nsfw, false, name);
-  }
-});
+describe('command registry', () => {
+  it('loads 41 public commands plus the hidden intro handler, in directory order', () => {
+    expect(commands.size).toBe(42);
+    const visible = [...commands.values()].filter((command) => !command.hidden).map((command) => command.data.name);
+    expect(visible).toHaveLength(41);
+    expect(visible[0]).toBe('4k');
+    expect(visible).toEqual([...visible].sort((left, right) => left.localeCompare(right)));
+    expect(commands.get('intro').hidden).toBe(true);
+  });
 
-test('premium accepts one optional raw Discord user option', () => {
-  assert.deepEqual(commands.get('premium').data.options, [{
-    type: 6,
-    name: 'user',
-    description: 'User whose plan and remaining quotas you want to view.',
-    required: false,
-  }]);
-});
+  it('marks every media command age-restricted for all installs and contexts', () => {
+    const media = [...commands.values()].filter((command) => command.kind === 'media');
+    expect(media).toHaveLength(37);
+    for (const command of media) {
+      expect(command.data).toMatchObject({ type: 1, nsfw: true, integration_types: [0, 1], contexts: [0, 1, 2] });
+    }
+    for (const name of ['help', 'invite', 'ping', 'premium']) expect(commands.get(name).data.nsfw).toBe(false);
+  });
 
-test('legacy and active command options expose their exact choice values', () => {
-  for (const name of ['anal', 'ass', 'blowjob', 'boobs', 'buttplug', 'feet', 'thigh']) {
-    const option = commands.get(name).data.options[0];
-    assert.equal(option.name, 'style');
-    assert.deepEqual(option.choices, [
-      { name: 'Anime', value: 'Anime' },
-      { name: 'Real', value: 'Real' },
-    ]);
-  }
-  assert.deepEqual(commands.get('solo').data.options[0].choices, [
-    { name: 'Female', value: 'female' },
-    { name: 'Male', value: 'male' },
-  ]);
-  assert.deepEqual(commands.get('threesome').data.options[0].choices, [
-    { name: '3 Females', value: 'fff' },
-    { name: '2 Females 1 Male', value: 'ffm' },
-    { name: '2 Males 1 Female', value: 'mmf' },
-  ]);
-  assert.equal(commands.get('help').data.options[0].autocomplete, true);
+  it('keeps the full provider mapping for every media command', () => {
+    const actual = {};
+    for (const command of [...commands.values()].filter((item) => item.kind === 'media')) {
+      const groups = command.media.groups ?? { all: command.media.sources ?? [] };
+      actual[command.data.name] = Object.fromEntries(Object.entries(groups).map(([name, sources]) => [name, sources.map(descriptor)]));
+    }
+    expect(actual).toEqual(expectedCommandSources);
+    expect(commands.get('solo').media.randomGroups).toEqual(['female', 'male', 'nekosv4']);
+    expect(commands.get('threesome').media.randomGroups).toEqual(['fff', 'ffm', 'mmf', 'nekosv4']);
+    expect(commands.get('cosplay').media.orderedSources).toBe(true);
+    expect(SexComNiches).toHaveLength(31);
+  });
+
+  it('only references registered provider adapters', () => {
+    for (const command of [...commands.values()].filter((item) => item.kind === 'media')) {
+      for (const source of mediaSources(command)) expect(providerNames).toContain(source.provider);
+    }
+  });
+
+  it('fits every refresh state into Discord\'s 100-character custom_id', () => {
+    for (const command of [...commands.values()].filter((item) => item.kind === 'media')) {
+      const values = Object.keys(command.media.groups ?? { none: [] });
+      for (const value of values) {
+        const state = command.media.optionName ? { [command.media.optionName]: value } : {};
+        const customId = mediaCustomId(command.data.name, state);
+        expect(customId.length).toBeLessThanOrEqual(100);
+        expect(parseMediaCustomId(customId)).toEqual({ commandName: command.data.name, state });
+      }
+    }
+  });
+
+  it('rejects malformed or duplicate command modules', () => {
+    const valid = commands.get('invite');
+    expect(() => buildCommandRegistry([valid, valid])).toThrow(/Duplicate/);
+    expect(() => buildCommandRegistry([{ data: { name: 'Bad Name', description: 'x' }, execute() {} }])).toThrow(/invalid command name/);
+    expect(() => buildCommandRegistry([{ data: { name: 'x', description: 'y'.repeat(101) }, execute() {} }])).toThrow(/longer than 100/);
+  });
+
+  it('ranks fuzzy help searches by edit distance', () => {
+    expect(levenshteinDistance('tentacel', 'tentacle')).toBe(2);
+    expect(levenshteinDistance('', 'abc')).toBe(3);
+  });
 });

@@ -23,16 +23,6 @@ export const Emoji = Object.freeze({
   custom: Object.freeze({
     check: '<:CY:1071484103762915348>',
   }),
-  terminal: Object.freeze({
-    boot: '◉',
-    debug: '·',
-    error: '✖',
-    event: '◆',
-    info: '●',
-    stack: '↳',
-    success: '✓',
-    warn: '▲',
-  }),
 });
 
 export function uiText(emoji, text) {

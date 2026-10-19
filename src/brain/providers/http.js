@@ -1,321 +1,226 @@
-import https from 'node:https';
-import { checkServerIdentity } from 'node:tls';
 import { MediaProviderError } from './errors.js';
 
-function validateUrl(value) {
-  const url = value instanceof URL ? new URL(value) : new URL(String(value));
+const DEFAULT_JSON_BYTES = 1024 * 1024;
+const DEFAULT_TEXT_BYTES = 2 * 1024 * 1024;
+
+// Discord renders attachment:// images in embeds only for these formats.
+export const EMBEDDABLE_IMAGE_TYPES = Object.freeze(new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]));
+
+export function validateUrl(value) {
+  let url;
+  try {
+    url = value instanceof URL ? new URL(value) : new URL(String(value));
+  } catch (cause) {
+    throw new MediaProviderError('Provider returned a malformed URL.', { code: 'INVALID_URL', cause });
+  }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw new MediaProviderError(`Unsupported media URL protocol: ${url.protocol}`, { code: 'INVALID_URL' });
   }
   return url;
 }
 
-function assertAllowedHost(value, allowedHosts, allowSubdomains = true) {
-  if (!allowedHosts?.length) return;
+export function hostAllowed(value, allowedHosts, allowSubdomains = true) {
+  if (!allowedHosts?.length) return true;
   const hostname = validateUrl(value).hostname.toLowerCase();
-  const allowed = allowedHosts.some((entry) => {
+  return allowedHosts.some((entry) => {
     const normalized = String(entry).toLowerCase().replace(/^\./, '');
     return hostname === normalized || (allowSubdomains && hostname.endsWith(`.${normalized}`));
   });
-  if (!allowed) {
-    throw new MediaProviderError(`Provider returned an unexpected media host: ${hostname}`, { code: 'UNEXPECTED_HOST' });
+}
+
+function assertAllowedHost(value, allowedHosts, allowSubdomains) {
+  if (!hostAllowed(value, allowedHosts, allowSubdomains)) {
+    throw new MediaProviderError(`Provider returned an unexpected host: ${validateUrl(value).hostname}`, {
+      code: 'UNEXPECTED_HOST',
+    });
   }
 }
 
-function assertSize(response, maximumBytes) {
-  const contentLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
-    throw new MediaProviderError(`Media exceeds the ${maximumBytes}-byte download limit.`, { code: 'TOO_LARGE' });
-  }
+// Identifies an image by its magic bytes so CDN block pages served with a
+// 200 status and a misleading Content-Type are never uploaded to Discord.
+export function sniffImageType(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
+  if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38
+    && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return 'image/gif';
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+  return null;
 }
 
-function networkErrorMessage(error) {
-  const message = error?.message || 'Media request failed.';
-  const code = error?.cause?.code || error?.code;
-  return code && !message.includes(String(code)) ? `${message} (${code})` : message;
+async function readBounded(response, maximumBytes) {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    await response.body?.cancel();
+    throw new MediaProviderError(`Response exceeds the ${maximumBytes}-byte limit.`, { code: 'TOO_LARGE' });
+  }
+  if (!response.body) return new Uint8Array(0);
+
+  // Streamed with a running total: Content-Length can be absent, and a
+  // compressed body may inflate well past its declared size.
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maximumBytes) {
+      await reader.cancel();
+      throw new MediaProviderError(`Response exceeds the ${maximumBytes}-byte limit.`, { code: 'TOO_LARGE' });
+    }
+    chunks.push(value);
+  }
+  if (chunks.length === 1) return chunks[0];
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+export class SubrequestBudget {
+  constructor(limit) {
+    this.limit = limit;
+    this.used = 0;
+  }
+
+  get remaining() {
+    return Math.max(0, this.limit - this.used);
+  }
+
+  take() {
+    if (this.used >= this.limit) {
+      throw new MediaProviderError('The per-invocation subrequest budget is exhausted.', { code: 'BUDGET_EXHAUSTED' });
+    }
+    this.used += 1;
+  }
 }
 
 export class MediaHttpClient {
-  constructor({ timeoutMs, maximumBytes, logger, fetchImpl = globalThis.fetch, signal = null }) {
+  constructor({
+    timeoutMs,
+    maximumBytes,
+    deadline = Number.POSITIVE_INFINITY,
+    budget = null,
+    signal = null,
+    fetchImpl = (...args) => fetch(...args),
+    now = Date.now,
+  }) {
     this.timeoutMs = timeoutMs;
     this.maximumBytes = maximumBytes;
-    this.logger = logger.child({ subsystem: 'media-http' });
-    this.fetch = fetchImpl;
+    this.deadline = deadline;
+    this.budget = budget;
     this.signal = signal;
+    this.fetch = fetchImpl;
+    this.now = now;
+  }
+
+  remainingTime() {
+    return this.deadline - this.now();
   }
 
   async json(url, options = {}) {
-    return this.#request(url, options, async (response) => {
-      try {
-        return await response.json();
-      } catch (error) {
-        throw new MediaProviderError('Provider returned invalid JSON.', { code: 'INVALID_RESPONSE', cause: error });
-      }
-    });
-  }
-
-  withMaximumBytes(maximumBytes) {
-    const bounded = Math.min(this.maximumBytes, maximumBytes);
-    return {
-      json: this.json.bind(this),
-      text: (url, options = {}) => this.text(url, {
-        ...options,
-        maximumBytes: Math.min(options.maximumBytes ?? bounded, bounded),
-      }),
-      buffer: (url, options = {}) => this.buffer(url, { ...options, maximumBytes: Math.min(options.maximumBytes ?? bounded, bounded) }),
-      expiredCertificateHttpsBuffer: (url, options = {}) => this.expiredCertificateHttpsBuffer(url, {
-        ...options,
-        maximumBytes: Math.min(options.maximumBytes ?? bounded, bounded),
-      }),
-    };
+    const { bytes } = await this.#request(url, options, (response) => readBounded(
+      response,
+      options.maximumBytes ?? DEFAULT_JSON_BYTES,
+    ));
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (cause) {
+      throw new MediaProviderError('Provider returned invalid JSON.', { code: 'INVALID_RESPONSE', cause });
+    }
   }
 
   async text(url, options = {}) {
-    return this.#request(url, options, async (response) => {
-      const maximumBytes = options.maximumBytes ?? this.maximumBytes;
-      assertSize(response, maximumBytes);
-      const text = await response.text();
-      if (Buffer.byteLength(text) > maximumBytes) {
-        throw new MediaProviderError(`Provider response exceeds the ${maximumBytes}-byte limit.`, {
-          code: 'TOO_LARGE',
-        });
-      }
-      return text;
-    });
+    const { bytes } = await this.#request(url, options, (response) => readBounded(
+      response,
+      options.maximumBytes ?? DEFAULT_TEXT_BYTES,
+    ));
+    return new TextDecoder().decode(bytes);
   }
 
+  // Downloads media for re-upload. With `expectImage`, the bytes must be an
+  // image format Discord can show inside an embed.
   async buffer(url, options = {}) {
-    const maximumBytes = options.maximumBytes ?? this.maximumBytes;
-    return this.#request(url, options, async (response) => {
-      assertSize(response, maximumBytes);
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.length > maximumBytes) {
-        throw new MediaProviderError(`Media exceeds the ${maximumBytes}-byte download limit.`, { code: 'TOO_LARGE' });
-      }
-      if (buffer.length < (options.minimumBytes ?? 1)) {
-        throw new MediaProviderError('Provider returned an empty or invalid media payload.', { code: 'INVALID_RESPONSE' });
-      }
-      return {
-        buffer,
-        contentType: response.headers.get('content-type')?.split(';')[0] || 'application/octet-stream',
-        finalUrl: response.url || String(url),
-      };
-    });
-  }
-
-  async expiredCertificateHttpsBuffer(url, options = {}) {
-    const parsed = validateUrl(url);
-    assertAllowedHost(parsed, options.allowedHosts, options.allowSubdomains);
-    if (parsed.protocol !== 'https:') {
-      throw new MediaProviderError('Expired-certificate compatibility requires HTTPS.', {
-        code: 'INVALID_URL',
-      });
+    const maximumBytes = Math.min(options.maximumBytes ?? this.maximumBytes, this.maximumBytes);
+    const result = await this.#request(url, options, (response) => readBounded(response, maximumBytes));
+    const { bytes, response } = result;
+    if (bytes.length < (options.minimumBytes ?? 1)) {
+      throw new MediaProviderError('Provider returned an empty or truncated media payload.', { code: 'INVALID_RESPONSE' });
     }
-    return requestHttpsBuffer({
-      hostname: parsed.hostname,
-      port: parsed.port || 443,
-      path: `${parsed.pathname}${parsed.search}`,
-      servername: parsed.hostname,
-      allowExpiredCertificate: true,
-      headers: options.headers,
-      timeoutMs: options.timeoutMs ?? this.timeoutMs,
-      maximumBytes: options.maximumBytes ?? this.maximumBytes,
-      minimumBytes: options.minimumBytes ?? 1,
-      finalUrl: parsed.toString(),
-      signal: options.signal ?? this.signal,
-    });
+    const declaredType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+    let contentType = declaredType;
+    if (options.expectImage) {
+      const sniffed = sniffImageType(bytes);
+      if (!sniffed || !EMBEDDABLE_IMAGE_TYPES.has(sniffed)) {
+        throw new MediaProviderError(`Provider returned a non-image payload (${declaredType}).`, { code: 'INVALID_RESPONSE' });
+      }
+      contentType = sniffed;
+    }
+    return {
+      buffer: bytes,
+      contentType,
+      finalUrl: response.url || String(url),
+    };
   }
 
   async #request(url, options, consume) {
     const parsed = validateUrl(url);
     assertAllowedHost(parsed, options.allowedHosts, options.allowSubdomains);
-    if (options.query) {
-      for (const [key, value] of Object.entries(options.query)) {
-        if (value !== undefined && value !== null) parsed.searchParams.set(key, String(value));
-      }
+    for (const [key, value] of Object.entries(options.query ?? {})) {
+      if (value !== undefined && value !== null) parsed.searchParams.set(key, String(value));
     }
 
-    const controller = new AbortController();
-    let timedOut = false;
-    const externalSignal = options.signal ?? this.signal;
-    const abort = () => controller.abort(externalSignal?.reason);
-    if (externalSignal?.aborted) abort();
-    else externalSignal?.addEventListener('abort', abort, { once: true });
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, options.timeoutMs ?? this.timeoutMs);
+    const configuredTimeout = options.timeoutMs ?? this.timeoutMs;
+    const remaining = this.remainingTime();
+    if (remaining <= 0) {
+      throw new MediaProviderError('The media deadline elapsed before the request started.', { code: 'DEADLINE_EXCEEDED' });
+    }
+    const timeout = Math.min(configuredTimeout, remaining);
+    const clippedByDeadline = timeout < configuredTimeout;
+    this.budget?.take();
+
+    const timeoutSignal = AbortSignal.timeout(timeout);
+    const signal = this.signal ? AbortSignal.any([timeoutSignal, this.signal]) : timeoutSignal;
     try {
-      const response = await this.fetch(parsed, {
+      const response = await this.fetch(parsed.toString(), {
         method: options.method ?? 'GET',
         headers: options.headers,
         body: options.body,
-        redirect: options.redirect ?? 'follow',
-        signal: controller.signal,
+        redirect: 'follow',
+        signal,
       });
       if (!response.ok) {
+        await response.body?.cancel();
         throw new MediaProviderError(`Provider returned HTTP ${response.status}.`, {
           code: 'HTTP_ERROR',
           status: response.status,
         });
       }
       assertAllowedHost(response.url || parsed, options.allowedHosts, options.allowSubdomains);
-      return await consume(response);
+      const bytes = await consume(response);
+      return { bytes, response };
     } catch (error) {
-      if (controller.signal.aborted || error?.name === 'AbortError') {
+      if (error instanceof MediaProviderError) throw error;
+      if (timeoutSignal.aborted) {
         throw new MediaProviderError(
-          timedOut ? 'Media request timed out.' : 'Media request was cancelled during shutdown.',
-          { code: timedOut ? 'TIMEOUT' : 'ABORTED', cause: error },
+          clippedByDeadline ? 'The media deadline elapsed during the request.' : 'Media request timed out.',
+          { code: clippedByDeadline ? 'DEADLINE_EXCEEDED' : 'TIMEOUT', cause: error },
         );
       }
-      if (error instanceof MediaProviderError) throw error;
-      throw new MediaProviderError(networkErrorMessage(error), {
-        code: 'NETWORK_ERROR',
-        cause: error,
-      });
-    } finally {
-      clearTimeout(timeout);
-      externalSignal?.removeEventListener('abort', abort);
+      if (this.signal?.aborted) {
+        throw new MediaProviderError('Media request was cancelled.', { code: 'ABORTED', cause: error });
+      }
+      throw new MediaProviderError(error?.message || 'Media request failed.', { code: 'NETWORK_ERROR', cause: error });
     }
   }
-}
-
-function authorizationErrorCode(value) {
-  if (!value) return null;
-  return value.code || String(value);
-}
-
-export function validateTlsSocket(socket, servername, {
-  allowExpiredCertificate = false,
-  checkIdentity = checkServerIdentity,
-} = {}) {
-  if (!allowExpiredCertificate) return;
-  const certificate = socket.getPeerCertificate?.(true);
-  if (!certificate || Object.keys(certificate).length === 0) {
-    throw new MediaProviderError('TLS peer did not provide a certificate.', {
-      code: 'TLS_CERTIFICATE_ERROR',
-    });
-  }
-  const identityError = checkIdentity(servername, certificate);
-  if (identityError) {
-    throw new MediaProviderError('TLS certificate does not match the requested media host.', {
-      code: 'TLS_IDENTITY_ERROR',
-      cause: identityError,
-    });
-  }
-  if (socket.authorized) return;
-  const authorizationError = authorizationErrorCode(socket.authorizationError);
-  if (authorizationError !== 'CERT_HAS_EXPIRED') {
-    throw new MediaProviderError('TLS certificate validation failed for the media host.', {
-      code: 'TLS_CERTIFICATE_ERROR',
-      cause: new Error(authorizationError || 'unknown TLS authorization error'),
-    });
-  }
-}
-
-export function requestHttpsBuffer({
-  hostname,
-  port = 443,
-  path,
-  servername,
-  allowExpiredCertificate = false,
-  headers = {},
-  timeoutMs,
-  maximumBytes,
-  minimumBytes = 1,
-  finalUrl,
-  signal,
-}) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let timeout;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      signal?.removeEventListener('abort', abort);
-      callback(value);
-    };
-    const request = https.request({
-      hostname,
-      port,
-      path,
-      method: 'GET',
-      servername,
-      rejectUnauthorized: !allowExpiredCertificate,
-      ...(allowExpiredCertificate ? { agent: false } : {}),
-      headers,
-    });
-
-    if (allowExpiredCertificate) {
-      request.on('socket', (socket) => {
-        const validate = () => {
-          try {
-            validateTlsSocket(socket, servername || hostname, { allowExpiredCertificate });
-          } catch (error) {
-            request.destroy(error);
-          }
-        };
-        if (socket.connecting) socket.once('secureConnect', validate);
-        else validate();
-      });
-    }
-
-    const abort = () => request.destroy(new MediaProviderError(
-      'Media request was cancelled during shutdown.',
-      { code: 'ABORTED', cause: signal?.reason },
-    ));
-    request.on('error', (error) => finish(reject,
-      error instanceof MediaProviderError
-        ? error
-        : new MediaProviderError(error.message, { code: 'NETWORK_ERROR', cause: error }),
-    ));
-    timeout = setTimeout(() => {
-      request.destroy(new MediaProviderError('Media request timed out.', { code: 'TIMEOUT' }));
-    }, timeoutMs);
-    if (signal?.aborted) abort();
-    else signal?.addEventListener('abort', abort, { once: true });
-    request.on('response', (response) => {
-      if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-        response.resume();
-        finish(reject, new MediaProviderError(`Provider returned HTTP ${response.statusCode}.`, {
-          code: 'HTTP_ERROR',
-          status: response.statusCode,
-        }));
-        return;
-      }
-
-      const declaredLength = Number(response.headers['content-length']);
-      if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-        response.destroy();
-        finish(reject, new MediaProviderError('Media payload is too large.', { code: 'TOO_LARGE' }));
-        return;
-      }
-
-      const chunks = [];
-      let received = 0;
-      response.on('data', (chunk) => {
-        received += chunk.length;
-        if (received > maximumBytes) {
-          response.destroy(new MediaProviderError('Media payload is too large.', { code: 'TOO_LARGE' }));
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on('error', (error) => finish(reject, error));
-      response.on('end', () => {
-        const buffer = Buffer.concat(chunks);
-        if (buffer.length < minimumBytes) {
-          finish(reject, new MediaProviderError('Provider returned an empty or invalid media payload.', { code: 'INVALID_RESPONSE' }));
-          return;
-        }
-        finish(resolve, {
-          buffer,
-          contentType: String(response.headers['content-type'] || 'application/octet-stream').split(';')[0],
-          finalUrl,
-        });
-      });
-    });
-    request.end();
-  });
 }

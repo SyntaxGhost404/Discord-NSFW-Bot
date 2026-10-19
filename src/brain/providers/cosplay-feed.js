@@ -1,32 +1,22 @@
 import { MediaProviderError } from './errors.js';
 import { choose, randomInteger } from '../../lib/random.js';
 
-const MAXIMUM_FEED_BYTES = 2 * 1024 * 1024;
+const MAXIMUM_FEED_BYTES = 3 * 1024 * 1024;
 const MAXIMUM_PAGE_DEPTH = 1_000_000;
-const IMAGE_PATH = /\.(?:avif|gif|jpe?g|png|webp)$/i;
+const ALBUM_IMAGE_WINDOW = 2_000;
+const IMAGE_PATH = /\.(?:gif|jpe?g|png|webp)$/i;
 const HENTAI_PAGE_PATH = /\/search\/page\/(\d+)\/?(?:[?#]|$)/i;
-const AHOTTIE_PAGE_QUERY = /[?&]page=(\d+)(?:[&#]|$)/i;
+const AHOTTIE_PAGE_QUERY = /[?&](?:amp;)?page=(\d+)/gi;
 const HENTAI_HOST = 'hentai-cosplay-xxx.com';
 const AHOTTIE_HOST = 'ahottie.top';
 const IMGBOX_IMAGE_HOST = /^images(\d*)\.imgbox\.com$/i;
 const IMGBOX_THUMB_HOST = /^thumbs(\d*)\.imgbox\.com$/i;
-const DISCORD_IMAGE_TYPES = new Set([
-  'image/avif',
-  'image/gif',
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-  'image/x-png',
-]);
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
 
 const HTML_HEADERS = Object.freeze({
   Accept: 'text/html,application/xhtml+xml',
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-});
-
-const MEDIA_HEADERS = Object.freeze({
-  Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+  'User-Agent': USER_AGENT,
 });
 
 const defaultDependencies = Object.freeze({ choose, randomInteger });
@@ -50,22 +40,29 @@ export function decodeHtml(value) {
     })[name.toLowerCase()]);
 }
 
+const ATTRIBUTE_PATTERN = /\s([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
+
+// One pass over a tag's attributes; values stay HTML-encoded until read.
+function tagAttributes(tag) {
+  const attributes = new Map();
+  for (const match of String(tag).matchAll(ATTRIBUTE_PATTERN)) {
+    const name = match[1].toLowerCase();
+    if (!attributes.has(name)) attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '');
+  }
+  return attributes;
+}
+
 function attribute(tag, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = String(tag).match(new RegExp(
-    `\\s${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-    'i',
-  ));
-  return decodeHtml(match?.[1] ?? match?.[2] ?? match?.[3] ?? '');
+  return decodeHtml(tagAttributes(tag).get(name.toLowerCase()) ?? '');
 }
 
 function anchors(html) {
   return [...String(html).matchAll(/<a\b[^>]*>/gi)].map((match) => match[0]);
 }
 
-function pageFromHref(href, pattern) {
-  const value = Number.parseInt(String(href).match(pattern)?.[1], 10);
-  return Number.isInteger(value) && value >= 1 && value <= MAXIMUM_PAGE_DEPTH ? value : null;
+function validPage(value) {
+  const page = Number.parseInt(value, 10);
+  return Number.isInteger(page) && page >= 1 && page <= MAXIMUM_PAGE_DEPTH ? page : null;
 }
 
 function maximumPage(values, provider) {
@@ -79,19 +76,20 @@ function maximumPage(values, provider) {
 
 export function hentaiCosplayMaximumPage(html) {
   const feedAnchors = anchors(html);
+  const pageOf = (tag) => validPage(attribute(tag, 'href').match(HENTAI_PAGE_PATH)?.[1]);
   const lastPages = feedAnchors
     .filter((tag) => attribute(tag, 'class').split(/\s+/).includes('last'))
-    .map((tag) => pageFromHref(attribute(tag, 'href'), HENTAI_PAGE_PATH))
+    .map(pageOf)
     .filter(Boolean);
   if (lastPages.length > 0) return maximumPage(lastPages, HENTAI_HOST);
-  return maximumPage(feedAnchors
-    .map((tag) => pageFromHref(attribute(tag, 'href'), HENTAI_PAGE_PATH))
-    .filter(Boolean), HENTAI_HOST);
+  return maximumPage(feedAnchors.map(pageOf).filter(Boolean), HENTAI_HOST);
 }
 
+// Ahottie pages are over a megabyte, so the ceiling is read with one flat
+// regex instead of parsing every anchor tag.
 export function ahottieMaximumPage(html) {
-  return maximumPage(anchors(html)
-    .map((tag) => pageFromHref(attribute(tag, 'href'), AHOTTIE_PAGE_QUERY))
+  return maximumPage([...String(html).matchAll(AHOTTIE_PAGE_QUERY)]
+    .map((match) => validPage(match[1]))
     .filter(Boolean), AHOTTIE_HOST);
 }
 
@@ -111,11 +109,12 @@ function largestSrcsetUrl(value) {
 function imageElementUrls(html) {
   const urls = [];
   for (const match of String(html).matchAll(/<(?:img|source)\b[^>]*>/gi)) {
-    const tag = match[0];
-    const original = attribute(tag, 'data-original') || attribute(tag, 'data-full');
-    const srcset = attribute(tag, 'data-srcset') || attribute(tag, 'srcset');
-    const lazy = attribute(tag, 'data-lazy-src') || attribute(tag, 'data-src');
-    const selected = original || largestSrcsetUrl(srcset) || lazy || attribute(tag, 'src');
+    const attributes = tagAttributes(match[0]);
+    const read = (name) => decodeHtml(attributes.get(name) ?? '');
+    const original = read('data-original') || read('data-full');
+    const srcset = read('data-srcset') || read('srcset');
+    const lazy = read('data-lazy-src') || read('data-src');
+    const selected = original || largestSrcsetUrl(srcset) || lazy || read('src');
     if (selected) urls.push(selected);
   }
   return urls;
@@ -178,20 +177,41 @@ export function cleanImgboxUrl(value, baseUrl) {
   return imageUrl(url) ? url.toString() : null;
 }
 
+// Finds `<a href=".../albums/...">` openings with native indexOf and reads
+// only a bounded window after each one, keeping CPU flat on huge pages. The
+// window ends at the next anchor boundary, so each image stays tied to the
+// album link that contains it.
 export function extractAhottieMedia(html, pageUrl) {
+  const source = String(html);
   const urls = [];
-  for (const match of String(html).matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/gi)) {
-    const block = match[0];
-    const href = httpsUrl(attribute(block.match(/^<a\b[^>]*>/i)?.[0], 'href'), pageUrl);
+  let cursor = 0;
+  for (;;) {
+    const marker = source.indexOf('/albums/', cursor);
+    if (marker < 0) break;
+    cursor = marker + 8;
+    const tagStart = source.lastIndexOf('<a', marker);
+    const tagEnd = source.indexOf('>', marker);
+    if (tagStart < 0 || tagEnd < 0 || source.lastIndexOf('>', marker) > tagStart) continue;
+    const openingTag = source.slice(tagStart, tagEnd + 1);
+    if (!/^<a\b/i.test(openingTag)) continue;
+    const href = httpsUrl(attribute(openingTag, 'href'), pageUrl);
     if (!href || !hasHost(href, AHOTTIE_HOST) || !href.pathname.startsWith('/albums/')) continue;
-    for (const value of imageElementUrls(block)) {
+
+    let window = source.slice(tagEnd + 1, tagEnd + 1 + ALBUM_IMAGE_WINDOW);
+    const boundary = window.search(/<\/a\s*>|<\/>|<a\b/i);
+    if (boundary >= 0) window = window.slice(0, boundary);
+    for (const value of imageElementUrls(window)) {
       const media = cleanImgboxUrl(value, pageUrl);
       if (media) urls.push(media);
     }
+    cursor = tagEnd + 1;
   }
   return [...new Set(urls)];
 }
 
+// Reads the pagination ceiling, picks a fresh random feed page, and selects
+// one direct image from that page without ever opening a gallery. The image
+// is downloaded once and returned for native attachment upload.
 export async function fetchRandomCosplayAttachment({
   provider,
   pageUrl,
@@ -199,6 +219,7 @@ export async function fetchRandomCosplayAttachment({
   extractMedia,
   feedHosts,
   mediaHosts,
+  mediaReferer,
 }, context, dependencies = defaultDependencies) {
   const discoveryUrl = pageUrl(1);
   const requestOptions = {
@@ -221,27 +242,28 @@ export async function fetchRandomCosplayAttachment({
     });
   }
 
+  const mediaHeaders = {
+    Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+    'User-Agent': USER_AGENT,
+  };
+  // hentai-cosplay-xxx.com's CDN answers 403 to hotlinks without a Referer.
+  if (mediaReferer) mediaHeaders.Referer = mediaReferer;
   const download = await context.http.buffer(selectedUrl, {
-    headers: MEDIA_HEADERS,
+    headers: mediaHeaders,
     allowedHosts: mediaHosts,
     minimumBytes: 1_024,
+    expectImage: true,
   });
-  const contentType = String(download.contentType).toLowerCase();
   const resolvedUrl = httpsUrl(download.finalUrl || selectedUrl, selectedUrl);
   if (!resolvedUrl) {
     throw new MediaProviderError(`${provider} media redirected to an insecure or invalid URL.`, {
       code: 'INVALID_URL',
     });
   }
-  if (!DISCORD_IMAGE_TYPES.has(contentType)) {
-    throw new MediaProviderError(`${provider} returned a non-image media payload.`, {
-      code: 'INVALID_RESPONSE',
-    });
-  }
   return {
     page: selectedPage,
     url: resolvedUrl.toString(),
-    download: { ...download, contentType },
+    download,
   };
 }
 

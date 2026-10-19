@@ -1,6 +1,7 @@
 export const API_VERSION = 10;
 export const API_BASE_URL = `https://discord.com/api/v${API_VERSION}`;
 export const DEFAULT_GATEWAY_URL = `wss://gateway.discord.gg/?v=${API_VERSION}&encoding=json`;
+export const USER_AGENT = 'DiscordBot (https://github.com/SyntaxGhost404/Discord-NSFW-Bot, 3.0.0)';
 
 export const GatewayOpcode = Object.freeze({
   DISPATCH: 0,
@@ -23,10 +24,9 @@ export const GatewayIntent = Object.freeze({
   MESSAGE_CONTENT: 1 << 15,
 });
 
-export const BOT_GATEWAY_INTENTS =
-  GatewayIntent.GUILDS |
-  GatewayIntent.GUILD_MESSAGES |
-  GatewayIntent.DIRECT_MESSAGES;
+// Exact bot mentions carry their content without the privileged
+// MESSAGE_CONTENT intent, so mention replies need only these two intents.
+export const MENTION_GATEWAY_INTENTS = GatewayIntent.GUILD_MESSAGES | GatewayIntent.DIRECT_MESSAGES;
 
 export const InteractionType = Object.freeze({
   PING: 1,
@@ -100,9 +100,9 @@ export const MessageFlag = Object.freeze({
 export const ChannelType = Object.freeze({
   DM: 1,
   GROUP_DM: 3,
+  GUILD_ANNOUNCEMENT_THREAD: 10,
   GUILD_PUBLIC_THREAD: 11,
   GUILD_PRIVATE_THREAD: 12,
-  GUILD_ANNOUNCEMENT_THREAD: 10,
 });
 
 export const PermissionFlag = Object.freeze({
@@ -117,5 +117,9 @@ export const PermissionFlag = Object.freeze({
 export const BOT_INVITE_PERMISSIONS = Object.values(PermissionFlag)
   .reduce((permissions, flag) => permissions | flag, 0n)
   .toString();
+
+// Discord codes that mean an interaction token or its response no longer
+// exists, so no further callback or webhook edit can succeed.
+export const UNAVAILABLE_INTERACTION_CODES = Object.freeze(new Set([10008, 10015, 10062, 40060]));
 
 export const DISCORD_EPOCH = 1420070400000n;

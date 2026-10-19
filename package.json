@@ -1,27 +1,31 @@
 {
   "name": "discord-nsfw-bot",
-  "version": "2.0.0",
-  "description": "A modular Discord media bot implemented directly against Discord HTTP API v10 and Gateway v10.",
+  "version": "3.0.0",
+  "description": "An age-restricted Discord media bot for Cloudflare Workers, built directly on Discord HTTP interactions, the HTTP API v10, and Gateway v10.",
   "type": "module",
-  "main": "index.js",
+  "private": true,
+  "main": "src/index.js",
   "scripts": {
-    "start": "node scripts/start-with-logs.mjs",
-    "start:direct": "node index.js",
-    "logs:export": "node scripts/export-logs.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "register": "node scripts/register-commands.mjs",
+    "tail": "wrangler tail",
     "check": "node scripts/check.mjs",
-    "test": "node --test",
-    "validate": "npm run check && npm test"
+    "test": "vitest run",
+    "validate": "npm run check && npm test",
+    "test:live": "vitest run --config vitest.live.config.js"
   },
   "engines": {
-    "node": ">=20.18.0"
+    "node": ">=22.12.0"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SyntaxGhost404/Discord-NSFW-Bot.git"
   },
   "license": "MIT",
-  "dependencies": {
-    "chalk": "^5.6.2",
-    "ws": "^8.18.3"
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.4",
+    "vitest": "5.0.5",
+    "wrangler": "4.151.1"
   }
 }

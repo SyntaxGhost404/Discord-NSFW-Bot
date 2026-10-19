@@ -2,6 +2,7 @@ import { commandData, stringOption } from '../brain/command-schema.js';
 import { actionRow, button, shortTextInput } from '../discord/components.js';
 import { ButtonStyle } from '../discord/constants.js';
 import { focusedOption, modalValue, optionValue, requester } from '../discord/interaction-data.js';
+import { modal, reply, updateMessage } from '../discord/responses.js';
 import { avatarUrl, displayName } from '../lib/discord-user.js';
 import { randomColor } from '../lib/random.js';
 import { Emoji, uiText } from '../config/emojis.js';
@@ -41,7 +42,7 @@ function footer(interaction, text) {
   return { text, icon_url: avatarUrl(user) };
 }
 
-async function showDirectory(context, page) {
+function directoryMessage(context, page) {
   const commands = visibleCommands(context.commands);
   const totalPages = Math.max(1, Math.ceil(commands.length / ITEMS_PER_PAGE));
   const boundedPage = Math.min(totalPages, Math.max(1, page));
@@ -57,7 +58,7 @@ async function showDirectory(context, page) {
     ]),
   ].join('\n');
 
-  await context.responder.editOriginal({
+  return {
     embeds: [{
       title: uiText(Emoji.ui.nsfw, 'Command Directory'),
       description,
@@ -82,14 +83,13 @@ async function showDirectory(context, page) {
         disabled: boundedPage === totalPages,
       }),
     )],
-    attachments: [],
-  });
+  };
 }
 
-async function showCommand(context, targetName, returnPage = 1) {
+function commandMessage(context, targetName, returnPage = 1) {
   const target = context.commands.get(targetName);
   if (!target || target.hidden) {
-    await context.responder.editOriginal({
+    return {
       embeds: [{
         title: uiText(Emoji.ui.error, 'Error'),
         description: `Could not find information for command \`${targetName}\`.`,
@@ -100,9 +100,7 @@ async function showCommand(context, targetName, returnPage = 1) {
         label: uiText(Emoji.ui.back, 'Back to Directory'),
         style: ButtonStyle.SECONDARY,
       }))],
-      attachments: [],
-    });
-    return;
+    };
   }
 
   const commands = visibleCommands(context.commands);
@@ -113,7 +111,7 @@ async function showCommand(context, targetName, returnPage = 1) {
     : 'No parameters are available for this command.';
   const user = requester(context.interaction);
 
-  await context.responder.editOriginal({
+  return {
     embeds: [{
       title: uiText(Emoji.ui.nsfw, `Command Details: /${target.data.name}`),
       description: `**Description:**\n${target.data.description}`,
@@ -127,10 +125,19 @@ async function showCommand(context, targetName, returnPage = 1) {
       label: uiText(Emoji.ui.back, 'Back to Directory'),
       style: ButtonStyle.SECONDARY,
     }))],
-    attachments: [],
-  });
+  };
 }
 
+function bestMatch(commands, query) {
+  const ranked = visibleCommands(commands)
+    .map((command) => ({ name: command.data.name, distance: levenshteinDistance(query, command.data.name) }))
+    .sort((left, right) => left.distance - right.distance || left.name.localeCompare(right.name));
+  const best = ranked[0];
+  return best && best.distance <= 3 ? best.name : query;
+}
+
+// Every help view is computed locally, so it answers inline: new messages for
+// the slash command, in-place updates for buttons and the search modal.
 export default {
   data: commandData({
     name: 'help',
@@ -142,22 +149,20 @@ export default {
     })],
   }),
 
-  async autocomplete(context) {
+  autocomplete(context) {
     const query = String(focusedOption(context.interaction)?.value ?? '').toLowerCase();
-    const choices = visibleCommands(context.commands)
+    return visibleCommands(context.commands)
       .map((command) => command.data.name)
       .filter((name) => name.startsWith(query))
       .slice(0, 25)
       .map((name) => ({ name, value: name }));
-    await context.responder.autocomplete(choices);
   },
 
-  async execute(context, state) {
+  execute(context, state = {}) {
     const customId = state.customId ?? '';
     if (context.source === 'component' && customId.startsWith('help:search:')) {
-      const page = pageFromCustomId(customId);
-      await context.responder.modal({
-        custom_id: `help:modal:${page}`,
+      return modal({
+        custom_id: `help:modal:${pageFromCustomId(customId)}`,
         title: 'Search for a Command',
         components: [actionRow(shortTextInput({
           customId: 'search_query',
@@ -166,35 +171,25 @@ export default {
           maxLength: 32,
         }))],
       });
-      return;
     }
-
-    if (context.source === 'command') await context.responder.defer();
-    else await context.responder.deferUpdate();
 
     if (context.source === 'modal') {
-      const page = pageFromCustomId(customId);
       const query = modalValue(context.interaction, 'search_query').trim().toLowerCase();
-      const names = visibleCommands(context.commands).map((command) => command.data.name);
-      const ranked = names
-        .map((name) => ({ name, distance: levenshteinDistance(query, name) }))
-        .sort((left, right) => left.distance - right.distance || left.name.localeCompare(right.name));
-      const best = ranked[0];
-      await showCommand(context, best && best.distance <= 3 ? best.name : query, page);
-      return;
+      const message = commandMessage(context, bestMatch(context.commands, query), pageFromCustomId(customId));
+      // A modal opened from a message button can update that message; a
+      // modal without a source message must answer with a new one.
+      return context.interaction.message ? updateMessage(message) : reply(message);
     }
 
-    if (context.source === 'component' && customId.startsWith('help:command:')) {
-      await showCommand(context, decodeURIComponent(customId.slice('help:command:'.length)));
-      return;
+    if (context.source === 'component') {
+      if (customId.startsWith('help:command:')) {
+        return updateMessage(commandMessage(context, decodeURIComponent(customId.slice('help:command:'.length))));
+      }
+      return updateMessage(directoryMessage(context, pageFromCustomId(customId)));
     }
 
-    const requested = context.source === 'command' ? optionValue(context.interaction, 'command') : null;
-    if (requested) {
-      await showCommand(context, String(requested));
-      return;
-    }
-    await showDirectory(context, context.source === 'component' ? pageFromCustomId(customId) : 1);
+    const requested = optionValue(context.interaction, 'command');
+    return reply(requested ? commandMessage(context, String(requested)) : directoryMessage(context, 1));
   },
 };
 

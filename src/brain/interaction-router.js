@@ -1,16 +1,11 @@
-import { InteractionType } from '../discord/constants.js';
-import {
-  InteractionResponder,
-  isInteractionUnavailableError,
-} from '../discord/interaction-responder.js';
+import { InteractionResponseType, InteractionType } from '../discord/constants.js';
 import { commandNameForInteraction, parseMediaCustomId, requester } from '../discord/interaction-data.js';
+import { autocompleteResult, ephemeral, errorEmbed, reply } from '../discord/responses.js';
+import { InteractionWebhook, isInteractionUnavailableError } from '../discord/rest.js';
 import { isNsfwContext, nsfwErrorPayload } from './nsfw-guard.js';
 import { cooldownPayload } from './rate-limit/cooldown-payload.js';
 import { Emoji, uiText } from '../config/emojis.js';
 import { snowflakeTimestamp } from '../lib/snowflake.js';
-
-const INTERACTION_CACHE_TTL_MS = 15 * 60 * 1_000;
-const MAX_CACHED_INTERACTIONS = 10_000;
 
 function legacyRefreshTarget(customId, commands) {
   const parts = customId.slice('refresh_'.length).split('_');
@@ -32,246 +27,182 @@ function componentTarget(customId, commands) {
   return null;
 }
 
+function routeTarget(interaction, commands) {
+  switch (interaction.type) {
+    case InteractionType.APPLICATION_COMMAND:
+      return { commandName: commandNameForInteraction(interaction), state: {}, source: 'command' };
+    case InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE:
+      return { commandName: commandNameForInteraction(interaction), state: {}, source: 'autocomplete' };
+    case InteractionType.MESSAGE_COMPONENT: {
+      const target = componentTarget(interaction.data?.custom_id ?? '', commands);
+      return { commandName: target?.commandName ?? null, state: target?.state ?? {}, source: 'component' };
+    }
+    case InteractionType.MODAL_SUBMIT: {
+      const customId = interaction.data?.custom_id ?? '';
+      return { commandName: customId.startsWith('help:modal:') ? 'help' : null, state: { customId }, source: 'modal' };
+    }
+    default:
+      return null;
+  }
+}
+
+function unexpectedErrorMessage() {
+  return {
+    embeds: [errorEmbed(uiText(Emoji.ui.error, 'Error'), 'An unexpected error occurred while executing this interaction.')],
+    components: [],
+  };
+}
+
+// Maps one verified interaction onto { response, task }. `response` is the
+// JSON body returned to Discord inside its three-second window; `task` is
+// optional follow-up work the Worker keeps alive with ctx.waitUntil().
 export class InteractionRouter {
-  constructor({
-    commands,
-    rest,
-    gateway,
-    config,
-    mediaHttp,
-    rateLimiter = null,
-    circuitBreaker = null,
-    interactionConflictMonitor = null,
-    shutdownSignal = null,
-    logger,
-    now = Date.now,
-    random = Math.random,
-  }) {
+  constructor({ commands, logger, random = Math.random, now = Date.now }) {
     this.commands = commands;
-    this.rest = rest;
-    this.gateway = gateway;
-    this.config = config;
-    this.mediaHttp = mediaHttp;
-    this.rateLimiter = rateLimiter;
-    this.circuitBreaker = circuitBreaker;
-    this.interactionConflictMonitor = interactionConflictMonitor;
-    this.shutdownSignal = shutdownSignal;
     this.logger = logger.child({ subsystem: 'interaction-router' });
-    this.now = now;
     this.random = random;
-    this.seenInteractions = new Map();
-    this.accepting = true;
+    this.now = now;
   }
 
-  stopAccepting() {
-    this.accepting = false;
+  async route(interaction, runtime) {
+    if (interaction?.type === InteractionType.PING) {
+      return { response: { type: InteractionResponseType.PONG } };
+    }
+    const target = routeTarget(interaction, this.commands);
+    if (!target) return null;
+
+    const { commandName, state, source } = target;
+    const command = this.commands.get(commandName);
+    if (!command) {
+      return {
+        response: source === 'autocomplete'
+          ? autocompleteResult([])
+          : ephemeral({ content: 'This interaction is no longer available.' }),
+      };
+    }
+
+    if (source !== 'autocomplete') {
+      this.logger.event('Routing Discord interaction.', { command: commandName, source, interactionId: interaction.id });
+      if (command.data.nsfw && !isNsfwContext(interaction)) {
+        return { response: reply(nsfwErrorPayload()) };
+      }
+    }
+
+    let reservation = null;
+    try {
+      if (source !== 'autocomplete') {
+        const gate = await this.#quotaGate(command, source, interaction, runtime.quota);
+        if (gate && !gate.allowed) return { response: cooldownPayloadResponse(gate.releaseAt, this.random) };
+        reservation = gate?.reservation ?? null;
+      }
+
+      const context = this.#context(interaction, source, runtime);
+      if (source === 'autocomplete') {
+        const choices = typeof command.autocomplete === 'function' ? await command.autocomplete(context) : [];
+        return { response: autocompleteResult(choices ?? []) };
+      }
+
+      const descriptor = await command.execute(context, state);
+      const { task, ...response } = descriptor;
+      if (typeof task !== 'function') {
+        if (reservation) await runtime.quota.rollback(reservation);
+        return { response };
+      }
+      const heldReservation = reservation;
+      reservation = null;
+      return { response, task: this.#runTask(task, context, { command: commandName, source, reservation: heldReservation }) };
+    } catch (error) {
+      if (reservation) await runtime.quota.rollback(reservation);
+      this.logger.error('Unhandled interaction command error.', { command: commandName, source, interactionId: interaction.id, error });
+      return {
+        response: source === 'autocomplete' ? autocompleteResult([]) : ephemeral(unexpectedErrorMessage()),
+      };
+    }
   }
 
-  async handle(interaction) {
-    const receivedAt = this.now();
-    if (!this.#rememberInteraction(interaction?.id)) {
-      this.logger.debug('Ignoring duplicate Gateway interaction dispatch.', {
-        interactionId: interaction?.id,
+  #quotaGate(command, source, interaction, quota) {
+    if (!quota?.enabled) return null;
+    const userId = requester(interaction)?.id;
+    if (!userId) return null;
+    const mediaRequest = command.kind === 'media' && (source === 'command' || source === 'component');
+    if (mediaRequest) return quota.reserveMedia(userId);
+    const utilityRequest = command.kind !== 'media'
+      && (source === 'command' || (command.rateLimitComponents && source === 'component'));
+    return utilityRequest ? quota.consumeUtility(userId) : null;
+  }
+
+  #context(interaction, source, runtime) {
+    const advertisedLimit = Number(interaction.attachment_size_limit);
+    const maxMediaBytes = Number.isFinite(advertisedLimit) && advertisedLimit > 0
+      ? Math.min(runtime.config.maxMediaBytes, advertisedLimit)
+      : runtime.config.maxMediaBytes;
+    return {
+      interaction,
+      source,
+      config: runtime.config,
+      env: runtime.env,
+      cf: runtime.cf ?? null,
+      commands: this.commands,
+      circuitBreaker: runtime.circuitBreaker,
+      quota: runtime.quota,
+      rest: runtime.rest,
+      fetch: runtime.fetch,
+      receivedAt: runtime.receivedAt,
+      maxMediaBytes,
+      logger: this.logger,
+      webhook: new InteractionWebhook({
+        rest: runtime.webhookRest,
+        applicationId: interaction.application_id,
+        token: interaction.token,
+        receivedAt: runtime.receivedAt,
+      }),
+    };
+  }
+
+  // Wraps a deferred task so it can never reject inside waitUntil: failures
+  // are reported by editing the loading message, and a media reservation is
+  // committed only when media was actually displayed.
+  async #runTask(task, context, { command, source, reservation }) {
+    let outcome = null;
+    try {
+      outcome = await task();
+    } catch (error) {
+      await this.#reportTaskError(error, context, { command, source });
+    } finally {
+      if (reservation) {
+        if (outcome?.mediaDisplayed) await context.quota.commit(reservation);
+        else await context.quota.rollback(reservation);
+      }
+    }
+  }
+
+  async #reportTaskError(error, context, { command, source }) {
+    if (isInteractionUnavailableError(error)) {
+      let interactionAgeMs = null;
+      try {
+        interactionAgeMs = this.now() - snowflakeTimestamp(context.interaction.id);
+      } catch {
+        // Interaction IDs are snowflakes; the age is diagnostic only.
+      }
+      this.logger.warn('Discord interaction expired before the follow-up could be delivered.', {
+        code: Number(error.code),
+        command,
+        source,
+        interactionId: context.interaction.id,
+        interactionAgeMs,
       });
       return;
     }
-
-    const responder = new InteractionResponder({ interaction, rest: this.rest });
-    let commandName = null;
-    let state = {};
-    let source = null;
-    let reservation = null;
-
+    this.logger.error('Deferred interaction task failed.', { command, source, interactionId: context.interaction.id, error });
     try {
-      if (interaction.type === InteractionType.PING) {
-        await responder.pong();
-        return;
-      }
-
-      if (!this.accepting) {
-        if (interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE) {
-          await responder.autocomplete([]);
-        } else {
-          await responder.reply({
-            content: 'The bot is restarting and is not accepting new interactions yet. Please try again shortly.',
-            flags: 64,
-          });
-        }
-        return;
-      }
-
-      if (interaction.type === InteractionType.APPLICATION_COMMAND || interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE) {
-        commandName = commandNameForInteraction(interaction);
-        source = interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE ? 'autocomplete' : 'command';
-      } else if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
-        const target = componentTarget(interaction.data?.custom_id ?? '', this.commands);
-        commandName = target?.commandName ?? null;
-        state = target?.state ?? {};
-        source = 'component';
-      } else if (interaction.type === InteractionType.MODAL_SUBMIT) {
-        commandName = interaction.data?.custom_id?.startsWith('help:modal:') ? 'help' : null;
-        state = { customId: interaction.data?.custom_id };
-        source = 'modal';
-      } else {
-        return;
-      }
-
-      const command = this.commands.get(commandName);
-      if (!command) {
-        if (source === 'autocomplete') await responder.autocomplete([]);
-        else await responder.reply({ content: 'This interaction is no longer available.', flags: 64 });
-        return;
-      }
-      if (source !== 'autocomplete') {
-        this.logger.event('Routing Discord interaction.', {
-          command: commandName,
-          source,
-          interactionId: interaction.id,
-        });
-      }
-      if (source !== 'autocomplete' && command.data.nsfw && !isNsfwContext(interaction)) {
-        await responder.reply(nsfwErrorPayload());
-        return;
-      }
-
-      if (this.rateLimiter && source !== 'autocomplete') {
-        const userId = requester(interaction)?.id;
-        const mediaRequest = command.kind === 'media' && (source === 'command' || source === 'component');
-        const utilityRequest = command.kind !== 'media'
-          && (source === 'command' || (command.rateLimitComponents && source === 'component'));
-        if (userId && (mediaRequest || utilityRequest)) {
-          const gate = mediaRequest
-            ? this.rateLimiter.reserveMedia(userId)
-            : this.rateLimiter.consumeUtility(userId);
-          if (!gate.allowed) {
-            await responder.reply(cooldownPayload(gate.releaseAt, this.random));
-            return;
-          }
-          reservation = gate.reservation ?? null;
-        }
-      }
-
-      const advertisedAttachmentLimit = Number(interaction.attachment_size_limit);
-      const maxMediaBytes = Number.isFinite(advertisedAttachmentLimit) && advertisedAttachmentLimit > 0
-        ? Math.min(this.config.maxMediaBytes, advertisedAttachmentLimit)
-        : this.config.maxMediaBytes;
-      const context = {
-        interaction,
-        responder,
-        source,
-        rest: this.rest,
-        gateway: this.gateway,
-        config: this.config,
-        http: this.mediaHttp.withMaximumBytes(maxMediaBytes),
-        circuitBreaker: this.circuitBreaker,
-        rateLimiter: this.rateLimiter,
-        signal: this.shutdownSignal,
-        maxMediaBytes,
-        commands: this.commands,
-        logger: this.logger,
-      };
-
-      if (source === 'autocomplete') {
-        if (typeof command.autocomplete === 'function') await command.autocomplete(context);
-        else await responder.autocomplete([]);
-      } else {
-        const result = await command.execute(context, state);
-        if (reservation) {
-          if (result?.mediaDisplayed) this.rateLimiter.commit(reservation);
-          else this.rateLimiter.rollback(reservation);
-          reservation = null;
-        }
-      }
-    } catch (error) {
-      if (reservation) {
-        this.rateLimiter?.rollback(reservation);
-        reservation = null;
-      }
-      const unavailable = isInteractionUnavailableError(error);
-      if (unavailable) {
-        const failedAt = this.now();
-        let interactionAgeMs = null;
-        try {
-          interactionAgeMs = failedAt - snowflakeTimestamp(interaction.id);
-        } catch {
-          // Discord IDs are snowflakes, but classification can fall back to local elapsed time.
-        }
-        const details = {
-          error,
-          command: commandName,
-          source,
-          interactionId: interaction.id,
-          responseState: responder.responseState,
-          elapsedMs: failedAt - receivedAt,
-          interactionAgeMs,
-        };
-        if (this.interactionConflictMonitor) {
-          this.interactionConflictMonitor.record(details);
-        } else {
-          this.logger.warn('Discord interaction is no longer available.', {
-            code: Number(error.code),
-            command: commandName,
-            source,
-            interactionId: interaction.id,
-            responseState: responder.responseState,
-            callbackElapsedMs: Math.max(0, Math.round(details.elapsedMs)),
-            interactionAgeMs: Number.isFinite(interactionAgeMs)
-              ? Math.max(0, Math.round(interactionAgeMs))
-              : null,
-          });
-        }
-      } else {
-        this.logger.error('Unhandled interaction command error.', {
-          command: commandName,
-          interactionId: interaction.id,
-          responseState: responder.responseState,
-          error,
-        });
-      }
-
-      if (unavailable || interaction.type === InteractionType.PING) return;
-      try {
-        const data = {
-          embeds: [{
-            title: uiText(Emoji.ui.error, 'Error'),
-            description: 'An unexpected error occurred while executing this interaction.',
-            color: 0xed4245,
-          }],
-          components: [],
-        };
-        if (source === 'autocomplete') {
-          if (responder.canAcknowledge) await responder.autocomplete([]);
-        } else if (responder.acknowledged) {
-          await responder.editOriginal({ ...data, attachments: [] });
-        } else if (responder.canAcknowledge) {
-          await responder.reply({ ...data, flags: 64 });
-        }
-      } catch (responseError) {
-        const responseUnavailable = isInteractionUnavailableError(responseError);
-        const responseLog = responseUnavailable
-          ? this.logger.warn.bind(this.logger)
-          : this.logger.error.bind(this.logger);
-        responseLog(responseUnavailable
-          ? 'Interaction expired before an error response could be sent.'
-          : 'Failed to report an interaction error to Discord.', responseUnavailable
-          ? { code: Number(responseError.code), responseState: responder.responseState }
-          : responseError);
-      }
+      await context.webhook.editOriginal({ ...unexpectedErrorMessage(), attachments: [] });
+    } catch (reportError) {
+      const log = isInteractionUnavailableError(reportError) ? 'warn' : 'error';
+      this.logger[log]('Could not report the interaction failure to Discord.', { error: reportError });
     }
   }
+}
 
-  #rememberInteraction(interactionId) {
-    if (!interactionId) return true;
-    const now = this.now();
-    for (const [id, seenAt] of this.seenInteractions) {
-      if (now - seenAt < INTERACTION_CACHE_TTL_MS) break;
-      this.seenInteractions.delete(id);
-    }
-    if (this.seenInteractions.has(interactionId)) return false;
-    this.seenInteractions.set(interactionId, now);
-    while (this.seenInteractions.size > MAX_CACHED_INTERACTIONS) {
-      this.seenInteractions.delete(this.seenInteractions.keys().next().value);
-    }
-    return true;
-  }
+function cooldownPayloadResponse(releaseAt, random) {
+  return reply(cooldownPayload(releaseAt, random));
 }

@@ -13,15 +13,7 @@ const MAXIMUM_ITEM_COUNT = 1_000_000;
 const MAXIMUM_FEED_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_OFFSET_BYTES = 512 * 1024;
 const MEDIA_DOWNLOAD_ATTEMPTS = 2;
-const IMAGE_PATH = /\.(?:avif|jpe?g|png|webp)$/i;
-const DISCORD_IMAGE_TYPES = new Set([
-  'image/avif',
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-  'image/x-png',
-]);
+const IMAGE_PATH = /\.(?:jpe?g|png|webp)$/i;
 const P_MAX_PATTERN = /\bP_MAX\s*=\s*["']?(\d{1,7})["']?/g;
 const IMAGE_ATTRIBUTE_PATTERN = /\b(?:data-full|data-original|data-lazy-src|data-src|srcset|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const COVER_FIELD_PATTERN = /["']?t_url(?:_460)?["']?\s*:\s*(?:"([^"]*)"|'([^']*)')/gi;
@@ -234,6 +226,7 @@ async function downloadCover(url, context) {
         allowedHosts: [MEDIA_HOST],
         allowSubdomains: false,
         minimumBytes: 1_024,
+        expectImage: true,
       });
     } catch (error) {
       lastError = error;
@@ -265,10 +258,6 @@ export async function fetchPornPics(source, context, dependencies = defaultDepen
     selected ??= await offsetCover(category, selectedOffset, context);
 
     const download = await downloadCover(selected.url, context);
-    const contentType = String(download.contentType).toLowerCase();
-    if (!DISCORD_IMAGE_TYPES.has(contentType)) {
-      throw invalidResponse('PornPics CDN returned a non-image media payload.');
-    }
     const resolvedUrl = highResolutionPornPicsCover(download.finalUrl || selected.url);
     if (!resolvedUrl) {
       throw new MediaProviderError('PornPics media redirected to an insecure or invalid URL.', {
@@ -281,7 +270,7 @@ export async function fetchPornPics(source, context, dependencies = defaultDepen
       id: selected.id,
       url: resolvedUrl,
       watchUrl: selected.url,
-      download: { ...download, contentType },
+      download,
     });
   } catch (error) {
     throw providerError(error, PROVIDER);

@@ -5,6 +5,6 @@ export default defineMediaCommand({
   description: 'Delivers a random penetrative sex GIF',
   title: 'NSFW Sex GIF',
   sources: [
-    { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/fuck/gif' },
+    { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/fuck/gif' },
   ],
 });

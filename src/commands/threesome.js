@@ -18,13 +18,13 @@ export default defineMediaCommand({
   randomGroups: ['fff', 'ffm', 'mmf', 'nekosv4'],
   groups: {
     fff: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/threesome_fff/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/threesome_fff/gif' },
     ],
     ffm: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/threesome_ffm/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/threesome_ffm/gif' },
     ],
     mmf: [
-      { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/threesome_mmf/gif' },
+      { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/threesome_mmf/gif' },
     ],
     nekosv4: [
       { provider: 'nekosv4', endpoint: 'https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags=threesome' },

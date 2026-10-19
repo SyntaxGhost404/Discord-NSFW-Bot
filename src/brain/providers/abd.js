@@ -1,76 +1,72 @@
+import { ProviderEndpoint } from './manifest.js';
+import { EMBEDDABLE_IMAGE_TYPES } from './http.js';
 import { mediaResult } from './media-result.js';
 import { MediaProviderError, providerError } from './errors.js';
 
 const PROVIDER = 'n-sfw.com';
-const OSAKA_MEDIA_HOST = 'n-sfw.ap-osaka-1.s3.ink';
-const ABD_MEDIA_HOSTS = Object.freeze([OSAKA_MEDIA_HOST]);
-const MAXIMUM_OSAKA_TIMEOUT_MS = 5_000;
+const API_HOST = 'api.n-sfw.com';
+const MEDIA_HOST = ProviderEndpoint.N_SFW_MEDIA_HOST;
+const MAXIMUM_DOWNLOAD_TIMEOUT_MS = 6_000;
 
-function nativeResult(url, download) {
-  return mediaResult({
-    provider: PROVIDER,
-    url,
-    watchUrl: url,
-    download,
-  });
-}
-
-function validatedOsakaUrl(value) {
-  let parsed;
+function validatedMediaUrl(value) {
+  let url;
   try {
-    parsed = new URL(value);
+    url = new URL(value);
   } catch (cause) {
-    throw new MediaProviderError('N-SFW returned a malformed media URL.', {
-      code: 'INVALID_URL',
-      cause,
-    });
+    throw new MediaProviderError('N-SFW returned a malformed media URL.', { code: 'INVALID_URL', cause });
   }
-  if (parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443')) {
-    throw new MediaProviderError('N-SFW media URLs must use HTTPS on the standard port.', {
-      code: 'INVALID_URL',
-    });
+  if (url.protocol !== 'https:' || url.port || url.username || url.password) {
+    throw new MediaProviderError('N-SFW media URLs must use plain HTTPS.', { code: 'INVALID_URL' });
   }
-  if (parsed.hostname !== OSAKA_MEDIA_HOST) {
-    throw new MediaProviderError(`N-SFW returned an unexpected media host: ${parsed.hostname}`, {
-      code: 'UNEXPECTED_HOST',
-    });
+  if (url.hostname !== MEDIA_HOST) {
+    throw new MediaProviderError(`N-SFW returned an unexpected media host: ${url.hostname}`, { code: 'UNEXPECTED_HOST' });
   }
-  return parsed;
+  if (!url.pathname.startsWith('/nsfw/')) {
+    throw new MediaProviderError('N-SFW returned media outside the NSFW catalogue.', { code: 'INVALID_URL' });
+  }
+  url.hash = '';
+  return url;
 }
 
-function downloadOptions(context) {
-  return {
-    minimumBytes: 1_024,
-    allowedHosts: ABD_MEDIA_HOSTS,
-    allowSubdomains: false,
-    timeoutMs: Math.min(
-      context.config?.mediaTimeoutMs ?? MAXIMUM_OSAKA_TIMEOUT_MS,
-      MAXIMUM_OSAKA_TIMEOUT_MS,
-    ),
-  };
-}
-
+// GET https://api.n-sfw.com/nsfw/{category} returns one image object whose
+// `url` lives on data.n-sfw.com. The bytes are downloaded and re-uploaded as a
+// native attachment so a slow or failing image host is detected here, letting
+// the command fall back instead of posting a broken embed.
 export async function fetchAbd(source, context) {
   try {
-    const payload = await context.http.json(source.endpoint);
-    if (typeof payload?.url_japan !== 'string' || !payload.url_japan.trim()) {
-      throw new MediaProviderError('N-SFW response did not contain an Osaka media URL.', {
-        code: 'INVALID_RESPONSE',
-      });
+    const payload = await context.http.json(source.endpoint, {
+      allowedHosts: [API_HOST],
+      allowSubdomains: false,
+    });
+    if (typeof payload?.url !== 'string' || !payload.url.trim()) {
+      throw new MediaProviderError('N-SFW response did not contain a media URL.', { code: 'INVALID_RESPONSE' });
+    }
+    const url = validatedMediaUrl(payload.url.trim());
+    const mime = typeof payload.mime === 'string' ? payload.mime.toLowerCase() : '';
+    if (mime && !EMBEDDABLE_IMAGE_TYPES.has(mime)) {
+      throw new MediaProviderError(`N-SFW returned an unsupported media type: ${mime}`, { code: 'INVALID_RESPONSE' });
+    }
+    if (Number.isFinite(payload.size) && payload.size > context.maxMediaBytes) {
+      throw new MediaProviderError('N-SFW media exceeds the attachment limit.', { code: 'TOO_LARGE' });
     }
 
-    const parsed = validatedOsakaUrl(payload.url_japan);
-    const download = await context.http.expiredCertificateHttpsBuffer(
-      parsed.toString(),
-      downloadOptions(context),
-    );
-    return nativeResult(parsed.toString(), download);
+    const download = await context.http.buffer(url.toString(), {
+      allowedHosts: [MEDIA_HOST],
+      allowSubdomains: false,
+      minimumBytes: 1_024,
+      expectImage: true,
+      timeoutMs: Math.min(context.config.mediaTimeoutMs, MAXIMUM_DOWNLOAD_TIMEOUT_MS),
+    });
+    return mediaResult({
+      provider: PROVIDER,
+      id: typeof payload.name === 'string' ? payload.name : undefined,
+      url: url.toString(),
+      watchUrl: url.toString(),
+      download,
+    });
   } catch (error) {
     throw providerError(error, PROVIDER);
   }
 }
 
-export {
-  ABD_MEDIA_HOSTS,
-  OSAKA_MEDIA_HOST,
-};
+export { API_HOST as ABD_API_HOST, MEDIA_HOST as ABD_MEDIA_HOST };

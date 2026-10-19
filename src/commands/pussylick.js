@@ -5,6 +5,6 @@ export default defineMediaCommand({
   description: 'Delivers a random cunnilingus GIF',
   title: 'NSFW Pussy Licking GIF',
   sources: [
-    { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/pussylick/gif' },
+    { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/pussylick/gif' },
   ],
 });

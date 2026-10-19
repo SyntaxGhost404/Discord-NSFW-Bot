@@ -1,108 +1,120 @@
-import { BOT_GATEWAY_INTENTS } from './discord/constants.js';
+import { MENTION_GATEWAY_INTENTS } from './discord/constants.js';
 
 const SNOWFLAKE_PATTERN = /^\d{17,20}$/;
+const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/i;
 const REGISTRATION_MODES = new Set(['global', 'guild', 'both']);
+const GATEWAY_MODES = new Set(['full', 'presence', 'off']);
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
 
-function booleanValue(value, fallback = false) {
-  if (value === undefined || value === null || value === '') return fallback;
-  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+export class ConfigurationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
+
+function text(env, name) {
+  const value = env?.[name];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+// Returns the first configured name so errors can point at the variable the
+// operator actually set, including the legacy Replit-era aliases.
+function firstOf(env, names) {
+  for (const name of names) {
+    const value = text(env, name);
+    if (value) return { name, value };
+  }
+  return { name: names[0], value: '' };
+}
+
+function booleanValue(value, fallback) {
+  if (!value) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
 function integerValue(value, fallback, { minimum, maximum }) {
-  const parsed = Number.parseInt(value ?? '', 10);
+  const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(maximum, Math.max(minimum, parsed));
 }
 
-function requiredCredential(env, preferredName, legacyName, allowMissing) {
-  const preferred = env[preferredName]?.trim();
-  const legacy = env[legacyName]?.trim();
-  const value = preferred || legacy;
-  if (!value && !allowMissing) {
-    throw new Error(
-      `Missing required environment variable: ${preferredName} (legacy alias: ${legacyName})`,
+function optionalSnowflake({ name, value }) {
+  if (value && !SNOWFLAKE_PATTERN.test(value)) {
+    throw new ConfigurationError(
+      `${name} must be a 17-20 digit Discord snowflake. Do not use a Google OAuth client ID or a placeholder.`,
     );
   }
-  return {
-    name: preferred ? preferredName : legacyName,
-    value: value ?? '',
-  };
-}
-
-function optionalSnowflake(value, name) {
-  const normalized = value?.trim() ?? '';
-  if (normalized && !SNOWFLAKE_PATTERN.test(normalized)) {
-    throw new Error(`${name} must be a Discord snowflake.`);
-  }
-  return normalized || null;
+  return value || null;
 }
 
 function snowflakeList(value, name) {
-  const values = String(value ?? '')
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const values = value.split(',').map((entry) => entry.trim()).filter(Boolean);
   for (const entry of values) {
-    if (!SNOWFLAKE_PATTERN.test(entry)) throw new Error(`${name} must contain only Discord snowflakes.`);
+    if (!SNOWFLAKE_PATTERN.test(entry)) throw new ConfigurationError(`${name} must contain only Discord snowflakes.`);
   }
   return Object.freeze([...new Set(values)]);
 }
 
-export function loadConfig(env = process.env, { allowMissing = false } = {}) {
-  const botCredential = requiredCredential(
-    env,
-    'DISCORD_BOT_TOKEN',
-    'BOT_TOKEN',
-    allowMissing,
-  );
-  const clientCredential = requiredCredential(
-    env,
-    'DISCORD_CLIENT_ID',
-    'CLIENT_ID',
-    allowMissing,
-  );
-  const botToken = botCredential.value;
-  const clientId = clientCredential.value;
-
-  if (clientId && !SNOWFLAKE_PATTERN.test(clientId)) {
-    throw new Error(
-      `${clientCredential.name} must be a 17-20 digit Discord application ID. `
-      + 'Do not use a Google OAuth client ID or a placeholder value.',
-    );
+export function loadConfig(env) {
+  const applicationId = optionalSnowflake(firstOf(env, ['DISCORD_APPLICATION_ID', 'DISCORD_CLIENT_ID', 'CLIENT_ID']));
+  const publicKey = text(env, 'DISCORD_PUBLIC_KEY');
+  if (publicKey && !PUBLIC_KEY_PATTERN.test(publicKey)) {
+    throw new ConfigurationError('DISCORD_PUBLIC_KEY must be the 64-character hexadecimal key from the Developer Portal.');
   }
 
-  const registrationMode = env.COMMAND_REGISTRATION_MODE?.trim().toLowerCase() || 'global';
+  const registrationMode = text(env, 'COMMAND_REGISTRATION_MODE').toLowerCase() || 'global';
   if (!REGISTRATION_MODES.has(registrationMode)) {
-    throw new Error('COMMAND_REGISTRATION_MODE must be global, guild, or both.');
+    throw new ConfigurationError('COMMAND_REGISTRATION_MODE must be global, guild, or both.');
+  }
+  const testingGuildId = optionalSnowflake({ name: 'TESTING_GUILD_ID', value: text(env, 'TESTING_GUILD_ID') });
+  if (registrationMode !== 'global' && !testingGuildId) {
+    throw new ConfigurationError(`${registrationMode} command registration requires TESTING_GUILD_ID.`);
   }
 
-  const testingGuildId = optionalSnowflake(env.TESTING_GUILD_ID, 'TESTING_GUILD_ID');
-  if ((registrationMode === 'guild' || registrationMode === 'both') && !testingGuildId) {
-    throw new Error(`${registrationMode} command registration requires TESTING_GUILD_ID.`);
-  }
+  const gatewayMode = text(env, 'GATEWAY_MODE').toLowerCase() || 'full';
+  if (!GATEWAY_MODES.has(gatewayMode)) throw new ConfigurationError('GATEWAY_MODE must be full, presence, or off.');
 
-  const logLevel = env.LOG_LEVEL?.trim().toLowerCase() || 'info';
-  if (!LOG_LEVELS.has(logLevel)) throw new Error('LOG_LEVEL must be debug, info, warn, or error.');
+  const logLevel = text(env, 'LOG_LEVEL').toLowerCase() || 'info';
+  if (!LOG_LEVELS.has(logLevel)) throw new ConfigurationError('LOG_LEVEL must be debug, info, warn, or error.');
 
   return Object.freeze({
-    botToken,
-    clientId,
-    testingGuildId,
+    applicationId,
+    publicKey: publicKey.toLowerCase() || null,
+    botToken: firstOf(env, ['DISCORD_BOT_TOKEN', 'BOT_TOKEN']).value || null,
     registrationMode,
-    gatewayIntents: BOT_GATEWAY_INTENTS,
-    mediaTimeoutMs: integerValue(env.MEDIA_TIMEOUT_MS, 15_000, { minimum: 1_000, maximum: 60_000 }),
-    maxMediaBytes: integerValue(env.MAX_MEDIA_BYTES, 10 * 1024 * 1024, { minimum: 64 * 1024, maximum: 25 * 1024 * 1024 }),
-    waifuImKey: env.WAIFU_IM_KEY?.trim() || null,
-    nekoBotAuthorization: env.NEKOBOT_AUTHORIZATION?.trim() || null,
-    waifuPicsEnabled: booleanValue(env.WAIFU_PICS, false),
-    premiumUserIds: snowflakeList(env.PREMIUM_USER_IDS, 'PREMIUM_USER_IDS'),
-    rateLimitStateFile: env.RATE_LIMIT_STATE_FILE?.trim() || '.runtime/rate-limits.json',
-    instanceLockFile: env.INSTANCE_LOCK_FILE?.trim() || '.runtime/bot-instance.lock',
-    instanceLockStaleMs: integerValue(env.INSTANCE_LOCK_STALE_MS, 30_000, { minimum: 10_000, maximum: 300_000 }),
-    shutdownDrainMs: integerValue(env.SHUTDOWN_DRAIN_MS, 5_000, { minimum: 500, maximum: 30_000 }),
-    shutdownSettleMs: integerValue(env.SHUTDOWN_SETTLE_MS, 2_000, { minimum: 250, maximum: 10_000 }),
-    shutdownHardTimeoutMs: integerValue(env.SHUTDOWN_HARD_TIMEOUT_MS, 12_000, { minimum: 2_000, maximum: 60_000 }),
+    testingGuildId,
+    gateway: Object.freeze({
+      mode: gatewayMode,
+      intents: gatewayMode === 'full' ? MENTION_GATEWAY_INTENTS : 0,
+      shardCount: integerValue(text(env, 'GATEWAY_SHARD_COUNT'), 1, { minimum: 1, maximum: 64 }),
+      activity: text(env, 'GATEWAY_ACTIVITY').slice(0, 128) || null,
+    }),
+    mediaTimeoutMs: integerValue(text(env, 'MEDIA_TIMEOUT_MS'), 10_000, { minimum: 1_000, maximum: 60_000 }),
+    mediaDeadlineMs: integerValue(text(env, 'MEDIA_DEADLINE_MS'), 24_000, { minimum: 5_000, maximum: 28_000 }),
+    maxMediaBytes: integerValue(text(env, 'MAX_MEDIA_BYTES'), 10 * 1024 * 1024, {
+      minimum: 64 * 1024,
+      maximum: 25 * 1024 * 1024,
+    }),
+    maxSubrequests: integerValue(text(env, 'MAX_SUBREQUESTS'), 45, { minimum: 10, maximum: 9_000 }),
+    waifuImKey: text(env, 'WAIFU_IM_KEY') || null,
+    nekoBotAuthorization: text(env, 'NEKOBOT_AUTHORIZATION') || null,
+    waifuPicsEnabled: booleanValue(text(env, 'WAIFU_PICS'), false),
+    premiumUserIds: snowflakeList(text(env, 'PREMIUM_USER_IDS'), 'PREMIUM_USER_IDS'),
     logLevel,
   });
+}
+
+const configCache = new WeakMap();
+
+// `env` is stable for the lifetime of an isolate, so parsing once per binding
+// object keeps per-request work to a lookup.
+export function configFor(env) {
+  if (!env || typeof env !== 'object') return loadConfig(env);
+  let config = configCache.get(env);
+  if (!config) {
+    config = loadConfig(env);
+    configCache.set(env, config);
+  }
+  return config;
 }

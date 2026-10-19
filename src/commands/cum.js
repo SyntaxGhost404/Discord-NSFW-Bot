@@ -5,6 +5,6 @@ export default defineMediaCommand({
   description: 'Delivers a random cum/ejaculation GIF',
   title: 'NSFW Cum GIF',
   sources: [
-    { provider: 'purrbot', endpoint: 'https://purrbot.site/api/img/nsfw/cum/gif' },
+    { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/cum/gif' },
   ],
 });

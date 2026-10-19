@@ -1,0 +1,15 @@
+# Local development secrets for `wrangler dev` and `npm run register`.
+# Copy this file to `.dev.vars` (ignored by Git). In production, store each
+# value with `npx wrangler secret put <NAME>` instead.
+
+# Required: Developer Portal -> General Information.
+DISCORD_APPLICATION_ID=replace_with_17_to_20_digit_application_id
+DISCORD_PUBLIC_KEY=replace_with_64_character_hex_public_key
+
+# Required for command registration, the Gateway session, and /ping.
+DISCORD_BOT_TOKEN=replace_with_discord_bot_token
+
+# Provider credentials.
+NEKOBOT_AUTHORIZATION=replace_with_nekobot_authorization_value
+# Optional: Waifu.im also works anonymously.
+WAIFU_IM_KEY=
