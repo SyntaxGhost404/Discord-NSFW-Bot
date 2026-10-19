@@ -26,6 +26,10 @@ WebSockets) plus Workers bindings.
   `UserQuota` Durable Object, so DMs, group DMs, and every server share one
   strongly consistent quota. Capacity is reserved before any provider is
   contacted and charged only when media is actually displayed.
+- **Ready-made `/cosplay` links.** The cosplay site takes 0.5–4.5 seconds to
+  build each feed page, so a `CosplayPool` Durable Object reads random pages
+  in the background and keeps about 30 image links ready. A `/cosplay` request
+  only downloads and checks one image.
 - **Optional Gateway presence.** A `DiscordGateway` Durable Object keeps one
   outbound Gateway WebSocket per shard so the bot appears online and answers a
   message that is only an @mention with the welcome card. Sessions resume
@@ -166,7 +170,8 @@ Everything runs on the Workers Free plan, with these trade-offs:
   plan's 13,000 GB-s daily allowance and the Paid plan's 400,000 GB-s monthly
   allowance, but it is most of the Free budget. Use `GATEWAY_MODE=off` for an
   HTTP-only bot (commands still work; the bot shows offline and ignores
-  mentions).
+  mentions). The `CosplayPool` object is active only for the few seconds
+  each background refill takes.
 
 ## Local development
 

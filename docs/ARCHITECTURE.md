@@ -1,6 +1,6 @@
 # Architecture
 
-The bot is one Cloudflare Worker (`src/index.js`) with two Durable Object
+The bot is one Cloudflare Worker (`src/index.js`) with three Durable Object
 classes and a cron trigger. All Discord traffic uses the raw HTTP API v10 and
 Gateway v10; no Discord client library is involved.
 
@@ -10,6 +10,7 @@ Discord ──HTTPS POST /interactions──▶ Worker fetch()
                                         ├─ inline response (help, autocomplete, modal, invite, refusals)
                                         └─ deferred response + ctx.waitUntil(task)
                                               ├─ UserQuota DO (reserve → commit/rollback)
+                                              ├─ CosplayPool DO (ready /cosplay links; refills in alarms)
                                               ├─ media providers (fetch, bounded)
                                               └─ PATCH /webhooks/{app}/{token}/messages/@original
 
@@ -91,10 +92,41 @@ and `/cosplay` also requires at least 300 pixels in each direction, read from
 the image header. It retries with other images, and its Ahottie fallback is
 off unless `AHOTTIE=true`.
 
+Downloaded media is uploaded rather than linked whenever Discord would
+otherwise have to fetch it after the message is posted. For a linked image,
+Discord fills in the size only if it can fetch the image while the message is
+being created. Otherwise the message shows a loading spinner until a
+background job finishes. The Waifu archive is served too slowly for the first
+case, so its originals are uploaded, and they render as soon as the message
+appears.
+
 `ProviderCircuitBreaker` opens a provider after three consecutive failures for
 a random 30–120 seconds, then lets one real request probe it. Deadline and
 budget exhaustion are neutral; the breaker lives in isolate memory, so each
 isolate learns independently.
+
+## Cosplay link pool
+
+hentai-cosplay-xxx.com builds every feed page on demand, which takes 0.5–4.5
+seconds; only its first page is cached. `CosplayPool`
+(`src/durable/cosplay-pool.js`) is one shared object that keeps about 30
+direct image links ready:
+
+- **Serving.** `take()` hands out one random link and removes it. The
+  provider then downloads and checks the image exactly as before. A pool call
+  that fails or takes longer than one second falls back to reading a feed
+  page directly.
+- **Refilling.** Below 20 links, an alarm reads up to four random feed pages
+  and adds at most five links from each, so consecutive images come from
+  different parts of the site. The page count is re-read every six hours.
+- **Dead servers.** Before a page's links are added, one ranged request reads
+  the first 4 KiB of a file from each image server on the page. A server
+  that fails, or one a user's download reports through `reportDeadHost()`, is
+  dropped from the pool for 30 minutes along with all of its links.
+- **Persistence.** Links survive restarts and deployments in the object's
+  SQLite storage. A failed refill reschedules itself for a minute later.
+
+The pool holds only links; image bytes are never cached.
 
 ## Quotas
 

@@ -163,9 +163,13 @@ describe('media commands', () => {
       expect(request.headers.get('authorization')).toBeNull();
       return json({ items: [{ id: 1, url: 'https://waifu-im-shim.trinitymoin.workers.dev/1.jpg', is_nsfw: true }] });
     });
+    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/1.jpg', () => image('image/jpeg'));
     discordWebhookRoute();
     await send(commandInteraction('ecchi', { userId: '555555555555555558' }));
-    expect((await lastEdit()).payload.embeds[0].image.url).toBe('https://waifu-im-shim.trinitymoin.workers.dev/1.jpg');
+    const { payload, multipart } = await lastEdit();
+    expect(multipart).toBe(true);
+    expect(payload.embeds[0].image.url).toBe('attachment://media.jpg');
+    expect(payload.components[0].components[1].url).toBe('https://waifu-im-shim.trinitymoin.workers.dev/1.jpg');
   });
 
   it('reports total failure without charging quota, then refreshes with the chosen style', async () => {

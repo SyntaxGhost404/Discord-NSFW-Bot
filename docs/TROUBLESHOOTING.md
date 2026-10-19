@@ -111,8 +111,10 @@ image is replaced with another one, up to three per provider. Set
 another." with its `code`.
 
 - **Hentai-cosplay-xxx (primary).** Several of its image servers answer `502`
-  for every file. Each retry reads a new random feed page, which almost always
-  lands on a working server.
+  for every file. The `CosplayPool` object checks each server before adding
+  its links and drops a server for 30 minutes when a download reports it
+  down. Without the pool, each retry reads a new random feed page, which
+  almost always lands on a working server.
 - **Ahottie (fallback, off by default).** Its images are hosted on imgbox. In
   October 2026 imgbox answered every request with the same "Thumbnail
   Temporarily Unavailable" picture, which is rejected as `PLACEHOLDER_IMAGE`.
@@ -120,6 +122,17 @@ another." with its `code`.
   Hentai-cosplay-xxx alone and shows the error embed if all three of its
   attempts fail. Turn Ahottie back on only once imgbox serves real images
   again.
+
+`/cosplay` normally answers in about a second, because its links come from
+the `CosplayPool` object. If it takes several seconds again, check the logs:
+
+- **"Cosplay pool did not answer in time; reading the feed directly."** or
+  **"Cosplay pool call failed; reading the feed directly."** The pool took
+  longer than one second or returned an error. The request still works, just
+  at the old speed.
+- **"Cosplay pool refill failed."** The pool could not read the site, and it
+  tries again a minute later. A pool that has run dry is refilled
+  automatically once the site answers again.
 
 If a host starts sending a new stand-in picture, add its byte size and SHA-256
 to `KNOWN_PLACEHOLDERS` in `src/brain/providers/http.js`:

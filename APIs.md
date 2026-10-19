@@ -115,10 +115,22 @@ returns up to five random matches in the Waifu.im v7 shape:
 ```
 
 The adapter (`src/brain/providers/waifu-archive.js`) accepts only items whose
-`url` is HTTPS on the archive's own host with an `/{id}.{ext}` image path, and
-embeds the first one by URL. Images are served from `/{id}.{ext}` with
-immutable caching. The archive ignores `Accept-Version` and `Authorization`,
-so neither is sent.
+`url` is HTTPS on the archive's own host with an `/{id}.{ext}` image path. It
+downloads the first such file from the archive and uploads it as an
+attachment. A file that is too large to upload (judged from its
+`Content-Length` before the body is read), not an image, or a known
+placeholder is skipped in favour of the next match. A timeout or `5xx` error
+stops at once, because the archive itself is struggling. The original bytes
+are uploaded unchanged, and the Link button opens the file on the archive.
+The archive ignores `Accept-Version` and `Authorization`, so neither is sent.
+
+The file is uploaded rather than linked because of how Discord renders
+linked images. Discord fills in a linked image's size only if it can fetch
+the image while the message is being created. NekoBot and Purrbot images
+manage that, but archive images never did, so their messages showed a loading
+spinner until a background job finished. That took about 4 seconds in tests
+and up to minutes in practice. An uploaded image is sized and served by
+Discord's own CDN, so it renders as soon as the message appears.
 
 Tags used, with the number of NSFW images each has in the archive: `ass`
 (414), `ecchi` (2,138), `ero` (3,014), `hentai` (883), `maid` (191), `milf`
@@ -215,6 +227,12 @@ as an attachment. Up to three pages are tried.
 the feed's page count, pick a random page, choose one image on it, download
 it, and upload it as an attachment. Gallery and album pages are never
 opened.
+
+For Hentai-cosplay-xxx, the links usually come ready-made from the
+`CosplayPool` Durable Object (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md#cosplay-link-pool)),
+so no feed page is read while the user waits. In a live test this took the
+provider from a median of 5.2 seconds to 0.24 seconds. When the pool is empty
+or unreachable, the provider reads a feed page itself, as described below.
 
 Many album covers on both feeds are dead, so every download is checked before
 it is used. It must be a JPEG, PNG, GIF, or WebP of at least 1 KiB, at least

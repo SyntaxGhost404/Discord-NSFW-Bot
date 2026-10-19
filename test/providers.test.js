@@ -224,19 +224,32 @@ describe('JSON API providers', () => {
     await expect(fetchNekoBot({ type: 'hthigh' }, disabled)).rejects.toMatchObject({ code: 'PROVIDER_DISABLED' });
   });
 
-  it('searches the self-hosted Waifu archive and embeds its own image URL', async () => {
+  it('uploads the Waifu archive original, moving past files too large to upload', async () => {
     const archive = 'https://waifu-im-shim.trinitymoin.workers.dev';
-    const ctx = context([[`GET ${archive}/images?IncludedTags=maid&IsNsfw=True`, (request) => {
-      expect(request.headers.get('authorization')).toBeNull();
-      expect(request.headers.get('accept-version')).toBeNull();
-      return json({ items: [
-        { id: 9, url: 'https://cdn.waifu.im/9.png', is_nsfw: true },
-        { id: 2949, url: `${archive}/2949.png`, is_nsfw: true },
-      ] });
-    }]]);
-    expect(await fetchWaifuArchive({ tag: 'maid', isNsfw: true }, ctx)).toEqual({
-      provider: 'waifu archive', id: '2949', url: `${archive}/2949.png`, watchUrl: `${archive}/2949.png`,
+    const ctx = context([
+      [`GET ${archive}/images?IncludedTags=maid&IsNsfw=True`, (request) => {
+        expect(request.headers.get('authorization')).toBeNull();
+        expect(request.headers.get('accept-version')).toBeNull();
+        return json({ items: [
+          { id: 9, url: 'https://cdn.waifu.im/9.png', is_nsfw: true },
+          { id: 8610, url: `${archive}/8610.png`, is_nsfw: true },
+          { id: 2949, url: `${archive}/2949.png`, is_nsfw: true },
+        ] });
+      }],
+      [`GET ${archive}/8610.png`, () => new Response('x', { headers: { 'Content-Length': '15154809' } })],
+      [`GET ${archive}/2949.png`, () => image('image/png', 4_096)],
+    ]);
+    expect(await fetchWaifuArchive({ tag: 'maid', isNsfw: true }, ctx)).toMatchObject({
+      provider: 'waifu archive', id: '2949', url: `${archive}/2949.png`, watchUrl: `${archive}/2949.png`, contentType: 'image/png', fileName: 'media.png',
     });
+    expect(ctx.calls.map((request) => new URL(request.url).pathname)).toEqual(['/images', '/8610.png', '/2949.png']);
+
+    const struggling = context([
+      [`GET ${archive}/images?`, () => json({ items: [{ id: 1, url: `${archive}/1.png` }, { id: 2, url: `${archive}/2.png` }] })],
+      [`GET ${archive}/1.png`, () => new Response('busy', { status: 503 })],
+    ]);
+    await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, struggling)).rejects.toMatchObject({ code: 'HTTP_ERROR', status: 503, provider: 'waifu archive' });
+    expect(struggling.calls).toHaveLength(2);
 
     for (const items of [[], [{ id: 1, url: 'http://waifu-im-shim.trinitymoin.workers.dev/1.png' }], [{ id: 1, url: `${archive}/notes.txt` }]]) {
       const empty = context([[`GET ${archive}/images?`, () => json({ items })]]);
@@ -349,6 +362,33 @@ describe('cosplay feeds', () => {
     const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => pages.shift(), choose: (items) => items[0] });
     expect(result).toMatchObject({ id: '44', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/44.webp' });
     expect(ctx.calls).toHaveLength(7);
+  });
+
+  it('serves links from the cosplay pool without reading a feed page', async () => {
+    const cover = (id) => `https://static1.hentai-cosplay-xxx.com/upload/2026/1/${id}.webp`;
+    const ready = [{ url: cover(7), page: 7 }, { url: cover(8), page: 8 }];
+    const reported = [];
+    const pool = { take: async () => ready.shift() ?? null, reportDeadHost: async (url) => { reported.push(url); } };
+    const ctx = context([
+      [`GET ${cover(7)}`, () => new Response('error code: 502', { status: 502 })],
+      [`GET ${cover(8)}`, () => image('image/webp')],
+    ]);
+    ctx.env = { COSPLAY_POOL: { getByName: (name) => (name === 'hentai-cosplay-xxx.com' ? pool : null) } };
+    expect(await fetchHentaiCosplayXxx({}, ctx)).toMatchObject({ id: '8', url: cover(8), contentType: 'image/webp' });
+    expect(reported).toEqual([cover(7)]);
+    expect(ctx.calls.map((request) => request.url)).toEqual([cover(7), cover(8)]);
+  });
+
+  it('reads the feed directly when the pool is empty or failing', async () => {
+    for (const pool of [
+      { take: async () => null, reportDeadHost: async () => null },
+      { take: async () => { throw new Error('pool unavailable'); }, reportDeadHost: async () => null },
+    ]) {
+      const ctx = context([['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', () => image('image/webp')], ...hentaiFeedRoutes]);
+      ctx.env = { COSPLAY_POOL: { getByName: () => pool } };
+      expect(await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 42, choose: (items) => items[0] })).toMatchObject({ id: '42' });
+      expect(ctx.calls).toHaveLength(3);
+    }
   });
 
   it('gives up after three dead covers, or at once when the budget runs out', async () => {

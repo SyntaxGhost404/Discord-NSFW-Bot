@@ -172,6 +172,24 @@ async function readBounded(response, maximumBytes) {
   return bytes;
 }
 
+// Reads at most `length` bytes and then cancels the body, so a server that
+// ignores a Range header cannot make a short read download a whole file.
+async function readPrefix(response, length) {
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const bytes = new Uint8Array(length);
+  let received = 0;
+  while (received < length) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const take = Math.min(value.byteLength, length - received);
+    bytes.set(value.subarray(0, take), received);
+    received += take;
+  }
+  await reader.cancel().catch(() => {});
+  return bytes.subarray(0, received);
+}
+
 export class SubrequestBudget {
   constructor(limit) {
     this.limit = limit;
@@ -233,6 +251,15 @@ export class MediaHttpClient {
       options.maximumBytes ?? DEFAULT_TEXT_BYTES,
     ));
     return new TextDecoder().decode(bytes);
+  }
+
+  // Reads only the first `length` bytes of a file with a Range request, for a
+  // cheap check that its server is up and serving images.
+  async peek(url, options = {}) {
+    const length = options.length ?? 4_096;
+    const headers = { ...(options.headers ?? {}), Range: `bytes=0-${length - 1}` };
+    const { bytes } = await this.#request(url, { ...options, headers }, (response) => readPrefix(response, length));
+    return bytes;
   }
 
   // Downloads media for re-upload. With `expectImage`, the bytes must be an
