@@ -1,26 +1,27 @@
 {
-  "name": "app",
-  "version": "1.0.0",
-  "description": "",
+  "name": "discord-nsfw-bot",
+  "version": "2.0.0",
+  "description": "A modular Discord media bot implemented directly against Discord HTTP API v10 and Gateway v10.",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node scripts/start-with-logs.mjs",
+    "start:direct": "node index.js",
+    "logs:export": "node scripts/export-logs.mjs",
+    "check": "node scripts/check.mjs",
+    "test": "node --test",
+    "validate": "npm run check && npm test"
+  },
+  "engines": {
+    "node": ">=20.18.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/BDGAMINGYT8003/fictional-adventure.git"
+    "url": "git+https://github.com/SyntaxGhost404/Discord-NSFW-Bot.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/BDGAMINGYT8003/fictional-adventure/issues"
-  },
-  "homepage": "https://github.com/BDGAMINGYT8003/fictional-adventure#readme",
+  "license": "MIT",
   "dependencies": {
-    "axios": "^1.17.0",
-    "chalk": "^4.1.2",
-    "discord.js": "^14.25.1"
+    "chalk": "^5.6.2",
+    "ws": "^8.18.3"
   }
 }

@@ -1,1 +1,70 @@
+# Dependencies and package-manager state
 node_modules/
+.npm/
+.pnpm-store/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime output
+*.log
+logs/
+.runtime/
+coverage/
+dist/
+build/
+.cache/
+.temp/
+tmp/
+
+# Compiled files and caches
+*.py[cod]
+*.pyo
+__pycache__/
+*.class
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.wasm
+*.map
+
+# Generated archives and binary/media artifacts
+*.7z
+*.gz
+*.rar
+*.tar
+*.tgz
+*.zip
+*.gif
+*.jpe?g
+*.png
+*.webp
+*.avif
+*.mp3
+*.mp4
+*.webm
+*.mov
+*.pdf
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Crash output
+core
+core.*
+*.pid
+*.pid.lock
+
+# Local Discord documentation reference (intentionally not versioned)
+llms-full.txt

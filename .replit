@@ -1,34 +1,15 @@
 modules = ["nodejs-20"]
+
 [nix]
 channel = "stable-25_05"
 
-[agent]
-expertMode = true
-
 [workflows]
-runButton = "Project"
+runButton = "Start bot"
 
 [[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
-
-[[workflows.workflow]]
-name = "Start application"
+name = "Start bot"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "node index.js"
-
-[workflows.workflow.metadata]
-outputType = "console"
-
-[userenv]
-
-[userenv.shared]
-WAIFU_PICS = "false"
+args = "npm start"
