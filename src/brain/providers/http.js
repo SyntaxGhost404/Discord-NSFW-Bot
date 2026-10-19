@@ -54,6 +54,91 @@ export function sniffImageType(bytes) {
   return null;
 }
 
+const JPEG_FRAME_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+
+function fourCc(bytes, offset) {
+  return String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+}
+
+// Walks the JPEG segments up to the first frame header, which holds the size.
+function jpegDimensions(bytes) {
+  let offset = 2;
+  while (offset + 3 < bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+    const marker = bytes[offset + 1];
+    if (marker === 0xff) {
+      offset += 1;
+    } else if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      offset += 2;
+    } else if (marker === 0xd9 || marker === 0xda) {
+      return null;
+    } else if (JPEG_FRAME_MARKERS.has(marker)) {
+      if (offset + 8 >= bytes.length) return null;
+      return { width: (bytes[offset + 7] << 8) | bytes[offset + 8], height: (bytes[offset + 5] << 8) | bytes[offset + 6] };
+    } else {
+      const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+      if (length < 2) return null;
+      offset += 2 + length;
+    }
+  }
+  return null;
+}
+
+function webpDimensions(bytes) {
+  if (bytes.length < 30) return null;
+  const chunk = fourCc(bytes, 12);
+  if (chunk === 'VP8X') {
+    return {
+      width: 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16)),
+      height: 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16)),
+    };
+  }
+  if (chunk === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    return { width: (bytes[26] | (bytes[27] << 8)) & 0x3fff, height: (bytes[28] | (bytes[29] << 8)) & 0x3fff };
+  }
+  if (chunk === 'VP8L' && bytes[20] === 0x2f) {
+    const bits = bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24);
+    return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+  }
+  return null;
+}
+
+// Reads an image's pixel size from its header without decoding it. Returns
+// null when the header is missing or malformed.
+export function imageDimensions(bytes) {
+  switch (sniffImageType(bytes)) {
+    case 'image/jpeg':
+      return jpegDimensions(bytes);
+    case 'image/png': {
+      if (bytes.length < 24 || fourCc(bytes, 12) !== 'IHDR') return null;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return { width: view.getUint32(16), height: view.getUint32(20) };
+    }
+    case 'image/gif':
+      return bytes.length < 10 ? null : { width: bytes[6] | (bytes[7] << 8), height: bytes[8] | (bytes[9] << 8) };
+    case 'image/webp':
+      return webpDimensions(bytes);
+    default:
+      return null;
+  }
+}
+
+// Stand-in pictures that image hosts serve with status 200 in place of a
+// missing or withheld file. Only downloads of exactly the same length are
+// hashed, so the check costs nothing for real media.
+export const KNOWN_PLACEHOLDERS = Object.freeze([
+  // imgbox "Thumbnail Temporarily Unavailable", a 240x240 JPEG.
+  Object.freeze({ bytes: 8_091, sha256: 'c0ff95f9ec7fea007b8236e8efddfcc6c0dfdd56f8e4c38c8ffed8fde655d8a7' }),
+]);
+
+async function isKnownPlaceholder(bytes, placeholders) {
+  const sameLength = placeholders.filter((placeholder) => placeholder.bytes === bytes.byteLength);
+  if (sameLength.length === 0) return false;
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return sameLength.some((placeholder) => placeholder.sha256 === hex);
+}
+
 async function readBounded(response, maximumBytes) {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > maximumBytes) {
@@ -114,6 +199,7 @@ export class MediaHttpClient {
     signal = null,
     fetchImpl = (...args) => fetch(...args),
     now = Date.now,
+    placeholders = KNOWN_PLACEHOLDERS,
   }) {
     this.timeoutMs = timeoutMs;
     this.maximumBytes = maximumBytes;
@@ -122,6 +208,7 @@ export class MediaHttpClient {
     this.signal = signal;
     this.fetch = fetchImpl;
     this.now = now;
+    this.placeholders = placeholders;
   }
 
   remainingTime() {
@@ -149,7 +236,9 @@ export class MediaHttpClient {
   }
 
   // Downloads media for re-upload. With `expectImage`, the bytes must be an
-  // image format Discord can show inside an embed.
+  // image format Discord can show inside an embed and must not be a known
+  // placeholder; `minimumDimension` also requires a readable header with at
+  // least that many pixels in each direction.
   async buffer(url, options = {}) {
     const maximumBytes = Math.min(options.maximumBytes ?? this.maximumBytes, this.maximumBytes);
     const result = await this.#request(url, options, (response) => readBounded(response, maximumBytes));
@@ -163,6 +252,20 @@ export class MediaHttpClient {
       const sniffed = sniffImageType(bytes);
       if (!sniffed || !EMBEDDABLE_IMAGE_TYPES.has(sniffed)) {
         throw new MediaProviderError(`Provider returned a non-image payload (${declaredType}).`, { code: 'INVALID_RESPONSE' });
+      }
+      if (await isKnownPlaceholder(bytes, this.placeholders)) {
+        throw new MediaProviderError('Provider returned a known "image unavailable" placeholder.', { code: 'PLACEHOLDER_IMAGE' });
+      }
+      if (options.minimumDimension) {
+        const size = imageDimensions(bytes);
+        if (!size) {
+          throw new MediaProviderError('Provider returned an image with an unreadable header.', { code: 'INVALID_RESPONSE' });
+        }
+        if (size.width < options.minimumDimension || size.height < options.minimumDimension) {
+          throw new MediaProviderError(`Provider returned a ${size.width}x${size.height} image, below the ${options.minimumDimension}px minimum.`, {
+            code: 'IMAGE_TOO_SMALL',
+          });
+        }
       }
       contentType = sniffed;
     }

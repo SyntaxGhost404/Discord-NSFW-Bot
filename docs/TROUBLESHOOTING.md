@@ -78,6 +78,8 @@ configured source." with the `provider` and an error `code`:
 | --- | --- |
 | `HTTP_ERROR` | The provider answered with an error status (`error.status`). |
 | `INVALID_RESPONSE` | The expected field was missing, or a download was not a JPEG, PNG, GIF, or WebP image (for example, an HTML block page served with status `200`). |
+| `PLACEHOLDER_IMAGE` | The download was a known "image unavailable" stand-in, such as imgbox's "Thumbnail Temporarily Unavailable" picture. |
+| `IMAGE_TOO_SMALL` | The image was smaller than the source's minimum size (300 pixels in each direction for `/cosplay`). |
 | `UNEXPECTED_HOST` | The provider returned or redirected to a host outside its allowlist. |
 | `TOO_LARGE` | The file was larger than `MAX_MEDIA_BYTES` or the server's upload limit. |
 | `TIMEOUT` | The provider took longer than its per-request timeout. |
@@ -97,6 +99,34 @@ capped at six seconds so that other providers still have time. While the host
 is down, commands served only by N-SFW fail: `/breeding`, `/cages`, `/legs`,
 `/petgirls`, `/smothering`, `/socks`, and the Anime style of `/buttplug` and
 `/feet`.
+
+### `/cosplay` and dead album covers
+
+Both cosplay feeds link to many images that no longer load. Every cosplay
+image is downloaded before it is posted, so the bot checks the real file: the
+HTTP status, a JPEG, PNG, GIF, or WebP signature, at least 1 KiB, at least 300
+pixels in each direction, and no match with a known placeholder. A rejected
+image is replaced with another one, up to three per provider. Set
+`LOG_LEVEL=debug` to see each rejection as "Rejected a cosplay image; trying
+another." with its `code`.
+
+- **Hentai-cosplay-xxx (primary).** Several of its image servers answer `502`
+  for every file. Each retry reads a new random feed page, which almost always
+  lands on a working server.
+- **Ahottie (backup).** Its images are hosted on imgbox. In October 2026
+  imgbox answered every request with the same "Thumbnail Temporarily
+  Unavailable" picture, which is now rejected as `PLACEHOLDER_IMAGE`. Until
+  imgbox recovers, Ahottie cannot deliver anything, and `/cosplay` shows the
+  error embed on the rare occasions when the primary also fails.
+
+If a host starts sending a new stand-in picture, add its byte size and SHA-256
+to `KNOWN_PLACEHOLDERS` in `src/brain/providers/http.js`:
+
+```sh
+curl -s "<image URL>" -o placeholder.bin
+wc -c < placeholder.bin
+sha256sum placeholder.bin
+```
 
 ### Sites that refuse Cloudflare's network
 

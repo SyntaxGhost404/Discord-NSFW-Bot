@@ -14,7 +14,6 @@ export default defineConfig({
           DISCORD_PUBLIC_KEY: 'd0687e9a59a439a7e6a0c6c34a0c5693227dd47408ae54e1aff4013b742f01a3',
           DISCORD_BOT_TOKEN: 'test-bot-token',
           NEKOBOT_AUTHORIZATION: 'test-nekobot-authorization',
-          WAIFU_IM_KEY: '',
           GATEWAY_MODE: 'full',
           PREMIUM_USER_IDS: '999999999999999999',
           LOG_LEVEL: 'error',

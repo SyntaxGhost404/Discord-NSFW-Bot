@@ -97,7 +97,6 @@ export function loadConfig(env) {
       maximum: 25 * 1024 * 1024,
     }),
     maxSubrequests: integerValue(text(env, 'MAX_SUBREQUESTS'), 45, { minimum: 10, maximum: 9_000 }),
-    waifuImKey: text(env, 'WAIFU_IM_KEY') || null,
     nekoBotAuthorization: text(env, 'NEKOBOT_AUTHORIZATION') || null,
     waifuPicsEnabled: booleanValue(text(env, 'WAIFU_PICS'), false),
     premiumUserIds: snowflakeList(text(env, 'PREMIUM_USER_IDS'), 'PREMIUM_USER_IDS'),

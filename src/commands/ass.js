@@ -10,7 +10,7 @@ export default defineMediaCommand({
   groups: {
     Anime: [
       { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/ass' },
-      { provider: 'waifuim', tag: 'ass', isNsfw: true },
+      { provider: 'waifuarchive', tag: 'ass', isNsfw: true },
       { provider: 'nekobot', type: 'hass' },
     ],
     Real: [

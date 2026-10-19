@@ -11,5 +11,3 @@ DISCORD_BOT_TOKEN=replace_with_discord_bot_token
 
 # Provider credentials.
 NEKOBOT_AUTHORIZATION=replace_with_nekobot_authorization_value
-# Optional: Waifu.im also works anonymously.
-WAIFU_IM_KEY=

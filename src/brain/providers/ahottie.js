@@ -10,6 +10,8 @@ import {
 
 const PROVIDER = 'ahottie.top';
 
+// Ahottie pages are over a megabyte, so a retry uses another image from the
+// page already parsed instead of reading a new one.
 export async function fetchAhottie(_source, context, dependencies) {
   try {
     const result = await fetchRandomCosplayAttachment({

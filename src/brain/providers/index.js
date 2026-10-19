@@ -9,7 +9,7 @@ import { fetchPorngifs } from './porngifs.js';
 import { fetchPorngifsTv } from './porngifs-tv.js';
 import { fetchPurrbot } from './purrbot.js';
 import { fetchSexCom } from './sexcom.js';
-import { fetchWaifuIm } from './waifu-im.js';
+import { fetchWaifuArchive } from './waifu-archive.js';
 import { fetchWaifuPics } from './waifu-pics.js';
 import { MediaProviderError } from './errors.js';
 
@@ -26,7 +26,7 @@ const providers = Object.freeze({
   porngifstv: fetchPorngifsTv,
   purrbot: fetchPurrbot,
   sexcom: fetchSexCom,
-  waifuim: fetchWaifuIm,
+  waifuarchive: fetchWaifuArchive,
   waifupics: fetchWaifuPics,
 });
 

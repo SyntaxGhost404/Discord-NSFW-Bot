@@ -6,6 +6,6 @@ export default defineMediaCommand({
   title: 'NSFW Waifu Image',
   sources: [
     { provider: 'waifupics', endpoint: 'https://api.waifu.pics/nsfw/waifu' },
-    { provider: 'waifuim', tag: 'waifu', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'waifu', isNsfw: true },
   ],
 });

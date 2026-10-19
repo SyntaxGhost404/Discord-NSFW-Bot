@@ -12,7 +12,7 @@ export default defineMediaCommand({
       { provider: 'purrbot', endpoint: 'https://api.purrbot.site/v2/img/nsfw/blowjob/gif' },
       { provider: 'waifupics', endpoint: 'https://api.waifu.pics/nsfw/blowjob' },
       { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/blowjob' },
-      { provider: 'waifuim', tag: 'oral', isNsfw: true },
+      { provider: 'waifuarchive', tag: 'oral', isNsfw: true },
     ],
     Real: [
       { provider: 'nekobot', type: 'blowjob' },

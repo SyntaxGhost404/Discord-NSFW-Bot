@@ -5,7 +5,7 @@ export default defineMediaCommand({
   description: 'Delivers a random NSFW hentai Image/GIF',
   title: 'NSFW Hentai Image',
   sources: [
-    { provider: 'waifuim', tag: 'hentai', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'hentai', isNsfw: true },
     { provider: 'nekobot', type: 'hentai' },
   ],
 });

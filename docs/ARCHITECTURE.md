@@ -86,6 +86,9 @@ redirects, distinguishes provider `TIMEOUT` from invocation
 `DEADLINE_EXCEEDED`, and, for downloads that will be embedded, identifies the
 image by magic bytes so block pages served as `200` are never uploaded. Only
 JPEG, PNG, GIF, and WebP are accepted, because Discord embeds only those.
+Downloads that match a known "image unavailable" placeholder are rejected,
+and `/cosplay` also requires at least 300 pixels in each direction, read from
+the image header. Its feeds retry with other images before falling back.
 
 `ProviderCircuitBreaker` opens a provider after three consecutive failures for
 a random 30–120 seconds, then lets one real request probe it. Deadline and

@@ -209,9 +209,20 @@ export function extractAhottieMedia(html, pageUrl) {
   return [...new Set(urls)];
 }
 
-// Reads the pagination ceiling, picks a fresh random feed page, and selects
-// one direct image from that page without ever opening a gallery. The image
-// is downloaded once and returned for native attachment upload.
+// Album covers on these feeds are often dead: an image server answers 502, a
+// file is empty, or a host substitutes a stand-in picture. Every download is
+// checked before use, and a rejected one is replaced by another image.
+const MAXIMUM_ATTEMPTS = 3;
+// Real cosplay photos are hundreds of pixels on each side; "image
+// unavailable" stand-ins and icons are smaller.
+const MINIMUM_PHOTO_DIMENSION = 300;
+const STOP_CODES = new Set(['BUDGET_EXHAUSTED', 'DEADLINE_EXCEEDED', 'ABORTED']);
+
+// Reads the pagination ceiling, picks a random feed page, and downloads one
+// direct image from it without ever opening a gallery. Up to three images are
+// tried. With `freshPagePerAttempt`, every retry reads a new random page,
+// which escapes a feed page whose image server is down; otherwise retries use
+// other images from the same page, which avoids parsing another large page.
 export async function fetchRandomCosplayAttachment({
   provider,
   pageUrl,
@@ -220,27 +231,15 @@ export async function fetchRandomCosplayAttachment({
   feedHosts,
   mediaHosts,
   mediaReferer,
+  freshPagePerAttempt = false,
 }, context, dependencies = defaultDependencies) {
-  const discoveryUrl = pageUrl(1);
   const requestOptions = {
     headers: HTML_HEADERS,
     allowedHosts: feedHosts,
     maximumBytes: MAXIMUM_FEED_BYTES,
   };
-  const discoveryHtml = await context.http.text(discoveryUrl, requestOptions);
+  const discoveryHtml = await context.http.text(pageUrl(1), requestOptions);
   const pageCeiling = readMaximumPage(discoveryHtml);
-  const selectedPage = dependencies.randomInteger(1, pageCeiling);
-  const selectedPageUrl = pageUrl(selectedPage);
-  const feedHtml = selectedPage === 1
-    ? discoveryHtml
-    : await context.http.text(selectedPageUrl, requestOptions);
-  const candidates = extractMedia(feedHtml, selectedPageUrl);
-  const selectedUrl = dependencies.choose(candidates);
-  if (!selectedUrl) {
-    throw new MediaProviderError(`${provider} feed did not contain a usable direct image.`, {
-      code: 'INVALID_RESPONSE',
-    });
-  }
 
   const mediaHeaders = {
     Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
@@ -248,23 +247,60 @@ export async function fetchRandomCosplayAttachment({
   };
   // hentai-cosplay-xxx.com's CDN answers 403 to hotlinks without a Referer.
   if (mediaReferer) mediaHeaders.Referer = mediaReferer;
-  const download = await context.http.buffer(selectedUrl, {
-    headers: mediaHeaders,
-    allowedHosts: mediaHosts,
-    minimumBytes: 1_024,
-    expectImage: true,
-  });
-  const resolvedUrl = httpsUrl(download.finalUrl || selectedUrl, selectedUrl);
-  if (!resolvedUrl) {
-    throw new MediaProviderError(`${provider} media redirected to an insecure or invalid URL.`, {
-      code: 'INVALID_URL',
-    });
+
+  const attempted = new Set();
+  let page = null;
+  let candidates = [];
+  let lastError = null;
+  for (let attempt = 0; attempt < MAXIMUM_ATTEMPTS; attempt += 1) {
+    try {
+      let remaining = candidates.filter((url) => !attempted.has(url));
+      if (page === null || freshPagePerAttempt || remaining.length === 0) {
+        const nextPage = dependencies.randomInteger(1, pageCeiling);
+        const selectedPageUrl = pageUrl(nextPage);
+        const feedHtml = nextPage === 1 ? discoveryHtml : await context.http.text(selectedPageUrl, requestOptions);
+        candidates = extractMedia(feedHtml, selectedPageUrl);
+        page = nextPage;
+        remaining = candidates.filter((url) => !attempted.has(url));
+      }
+      const selectedUrl = dependencies.choose(remaining);
+      if (!selectedUrl) {
+        throw new MediaProviderError(`${provider} feed did not contain a usable direct image.`, {
+          code: 'INVALID_RESPONSE',
+        });
+      }
+      attempted.add(selectedUrl);
+      const download = await context.http.buffer(selectedUrl, {
+        headers: mediaHeaders,
+        allowedHosts: mediaHosts,
+        minimumBytes: 1_024,
+        expectImage: true,
+        minimumDimension: MINIMUM_PHOTO_DIMENSION,
+      });
+      const resolvedUrl = httpsUrl(download.finalUrl || selectedUrl, selectedUrl);
+      if (!resolvedUrl) {
+        throw new MediaProviderError(`${provider} media redirected to an insecure or invalid URL.`, {
+          code: 'INVALID_URL',
+        });
+      }
+      return {
+        page,
+        url: resolvedUrl.toString(),
+        download,
+      };
+    } catch (error) {
+      lastError = error;
+      if (STOP_CODES.has(error?.code)) break;
+      context.logger?.debug('Rejected a cosplay image; trying another.', {
+        provider,
+        page,
+        attempt: attempt + 1,
+        code: error?.code,
+        reason: error?.message,
+      });
+    }
   }
-  return {
-    page: selectedPage,
-    url: resolvedUrl.toString(),
-    download,
-  };
+  throw lastError;
 }
 
 export {

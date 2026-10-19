@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { fetchAbd } from '../src/brain/providers/abd.js';
+import { fetchAhottie } from '../src/brain/providers/ahottie.js';
 import { ahottieMaximumPage, extractAhottieMedia, extractHentaiCosplayMedia, hentaiCosplayMaximumPage } from '../src/brain/providers/cosplay-feed.js';
 import { fetchHentaiCosplayXxx } from '../src/brain/providers/hentai-cosplay-xxx.js';
-import { MediaHttpClient, SubrequestBudget, sniffImageType } from '../src/brain/providers/http.js';
+import { KNOWN_PLACEHOLDERS, MediaHttpClient, SubrequestBudget, imageDimensions, sniffImageType } from '../src/brain/providers/http.js';
 import { fetchNekoBot } from '../src/brain/providers/nekobot.js';
 import { fetchOBoobs } from '../src/brain/providers/obru.js';
 import { fetchPorngifs } from '../src/brain/providers/porngifs.js';
 import { extractPorngifsTvMedia, fetchPorngifsTv } from '../src/brain/providers/porngifs-tv.js';
 import { extractPornPicsCovers, highResolutionPornPicsCover, pornPicsItemCeiling } from '../src/brain/providers/pornpics.js';
 import { fetchSexCom } from '../src/brain/providers/sexcom.js';
-import { fetchWaifuIm } from '../src/brain/providers/waifu-im.js';
+import { fetchWaifuArchive } from '../src/brain/providers/waifu-archive.js';
 import { image, imageBytes, json } from './helpers/fetch-mock.js';
 
 function router(routes) {
@@ -31,8 +32,13 @@ function context(routes, { maxMediaBytes = 1_000_000, config = {}, http = {} } =
     calls,
     http: new MediaHttpClient({ timeoutMs: 5_000, maximumBytes: maxMediaBytes, fetchImpl, ...http }),
     maxMediaBytes,
-    config: { mediaTimeoutMs: 5_000, nekoBotAuthorization: 'auth', waifuImKey: null, ...config },
+    config: { mediaTimeoutMs: 5_000, nekoBotAuthorization: 'auth', ...config },
   };
+}
+
+async function sha256(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function hangingFetch() {
@@ -94,6 +100,48 @@ describe('MediaHttpClient', () => {
       expect(sniffImageType(imageBytes(type))).toBe(type);
     }
     expect(sniffImageType(new TextEncoder().encode('<!doctype html>'))).toBeNull();
+  });
+
+  it('reads pixel sizes from every embeddable format without decoding', () => {
+    for (const type of ['image/jpeg', 'image/png', 'image/gif', 'image/webp']) {
+      expect(imageDimensions(imageBytes(type, 2_048, { width: 640, height: 960 }))).toEqual({ width: 640, height: 960 });
+    }
+    // A progressive JPEG whose frame header follows an EXIF segment.
+    const progressive = Uint8Array.from([
+      0xff, 0xd8, 0xff, 0xe1, 0x00, 0x06, 0x45, 0x78, 0x69, 0x66,
+      0xff, 0xc2, 0x00, 0x11, 0x08, 0x02, 0xd0, 0x05, 0x00, 0x03,
+    ]);
+    expect(imageDimensions(progressive)).toEqual({ width: 1280, height: 720 });
+    // Lossy (VP8) and lossless (VP8L) WebP headers.
+    const lossy = imageBytes('image/webp', 64);
+    lossy.set([0x56, 0x50, 0x38, 0x20], 12);
+    lossy.set([0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x20, 0x03, 0x58, 0x02], 20);
+    expect(imageDimensions(lossy)).toEqual({ width: 800, height: 600 });
+    const lossless = imageBytes('image/webp', 64);
+    lossless.set([0x56, 0x50, 0x38, 0x4c], 12);
+    lossless.set([0x2f, 0x3f, 0x1f, 0x1d, 0x00], 20);
+    expect(imageDimensions(lossless)).toEqual({ width: 8_000, height: 117 });
+    expect(imageDimensions(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00]))).toBeNull();
+    expect(imageDimensions(new TextEncoder().encode('<!doctype html>'))).toBeNull();
+  });
+
+  it('rejects known placeholders, too-small images, and unreadable headers', async () => {
+    expect(KNOWN_PLACEHOLDERS).toContainEqual({ bytes: 8_091, sha256: 'c0ff95f9ec7fea007b8236e8efddfcc6c0dfdd56f8e4c38c8ffed8fde655d8a7' });
+    const standIn = imageBytes('image/jpeg', 1_500);
+    const ctx = context([
+      ['GET https://cdn.example/stand-in.jpg', () => new Response(standIn)],
+      ['GET https://cdn.example/same-length.jpg', () => image('image/jpeg', 1_500, { width: 1_000 })],
+      ['GET https://cdn.example/icon.png', () => image('image/png', 2_048, { width: 240, height: 240 })],
+      ['GET https://cdn.example/broken.jpg', () => new Response(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, ...new Uint8Array(2_000)]))],
+      ['GET https://cdn.example/photo.webp', () => image('image/webp', 2_048, { width: 1_280, height: 1_920 })],
+    ], { http: { placeholders: [{ bytes: 1_500, sha256: await sha256(standIn) }] } });
+    const photo = { expectImage: true, minimumDimension: 300 };
+
+    await expect(ctx.http.buffer('https://cdn.example/stand-in.jpg', { expectImage: true })).rejects.toMatchObject({ code: 'PLACEHOLDER_IMAGE' });
+    await expect(ctx.http.buffer('https://cdn.example/same-length.jpg', { expectImage: true })).resolves.toMatchObject({ contentType: 'image/jpeg' });
+    await expect(ctx.http.buffer('https://cdn.example/icon.png', photo)).rejects.toMatchObject({ code: 'IMAGE_TOO_SMALL' });
+    await expect(ctx.http.buffer('https://cdn.example/broken.jpg', photo)).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(ctx.http.buffer('https://cdn.example/photo.webp', photo)).resolves.toMatchObject({ contentType: 'image/webp' });
   });
 });
 
@@ -176,13 +224,24 @@ describe('JSON API providers', () => {
     await expect(fetchNekoBot({ type: 'hthigh' }, disabled)).rejects.toMatchObject({ code: 'PROVIDER_DISABLED' });
   });
 
-  it('adds the Waifu.im key only when configured', async () => {
-    const ctx = context([['GET https://api.waifu.im/images?IncludedTags=maid&IsNsfw=True', (request) => {
-      expect(request.headers.get('authorization')).toBe('ApiKey secret');
-      expect(request.headers.get('accept-version')).toBe('v7');
-      return json({ items: [{ url: 'https://cdn.waifu.im/2.png' }] });
-    }]], { config: { waifuImKey: 'secret' } });
-    expect((await fetchWaifuIm({ tag: 'maid', isNsfw: true }, ctx)).url).toBe('https://cdn.waifu.im/2.png');
+  it('searches the self-hosted Waifu archive and embeds its own image URL', async () => {
+    const archive = 'https://waifu-im-shim.trinitymoin.workers.dev';
+    const ctx = context([[`GET ${archive}/images?IncludedTags=maid&IsNsfw=True`, (request) => {
+      expect(request.headers.get('authorization')).toBeNull();
+      expect(request.headers.get('accept-version')).toBeNull();
+      return json({ items: [
+        { id: 9, url: 'https://cdn.waifu.im/9.png', is_nsfw: true },
+        { id: 2949, url: `${archive}/2949.png`, is_nsfw: true },
+      ] });
+    }]]);
+    expect(await fetchWaifuArchive({ tag: 'maid', isNsfw: true }, ctx)).toEqual({
+      provider: 'waifu archive', id: '2949', url: `${archive}/2949.png`, watchUrl: `${archive}/2949.png`,
+    });
+
+    for (const items of [[], [{ id: 1, url: 'http://waifu-im-shim.trinitymoin.workers.dev/1.png' }], [{ id: 1, url: `${archive}/notes.txt` }]]) {
+      const empty = context([[`GET ${archive}/images?`, () => json({ items })]]);
+      await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, empty)).rejects.toMatchObject({ code: 'INVALID_RESPONSE', provider: 'waifu archive' });
+    }
   });
 
   it('converts Sex.com WebP URIs to GIFs on the CDN and links the pin', async () => {
@@ -256,17 +315,56 @@ describe('cosplay feeds', () => {
       .toEqual(['https://static1.hentai-cosplay-xxx.com/upload/2026/1/3.webp']);
   });
 
+  // Feed pages first, then the first page at its final /search/ address.
+  const hentaiFeedRoutes = [
+    ['GET https://hentai-cosplay-xxx.com/search/page/', (request) => new Response(feedPage(request.url.match(/page\/(\d+)/)[1]))],
+    ['GET https://hentai-cosplay-xxx.com/search/', () => new Response(feedPage(1))],
+  ];
+
   it('sends a same-site Referer when downloading from the primary CDN', async () => {
     const ctx = context([
-      ['GET https://hentai-cosplay-xxx.com/search/page/1/', () => new Response(feedPage(1))],
-      ['GET https://hentai-cosplay-xxx.com/search/page/42/', () => new Response(feedPage(42))],
       ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', (request) => {
         expect(request.headers.get('referer')).toBe('https://hentai-cosplay-xxx.com/');
         return image('image/webp');
       }],
+      ...hentaiFeedRoutes,
     ]);
     const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 42, choose: (items) => items[0] });
     expect(result).toMatchObject({ id: '42', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', fileName: 'media.webp' });
+    expect(ctx.calls.map((request) => request.url)).toEqual([
+      'https://hentai-cosplay-xxx.com/search/',
+      'https://hentai-cosplay-xxx.com/search/page/42/',
+      'https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp',
+    ]);
+  });
+
+  it('moves to a fresh feed page when a cover is dead', async () => {
+    const ctx = context([
+      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', () => new Response('error code: 502', { status: 502 })],
+      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/43.webp', () => new Response(new Uint8Array(0))],
+      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/44.webp', () => image('image/webp', 4_096, { width: 1_280, height: 1_920 })],
+      ...hentaiFeedRoutes,
+    ]);
+    const pages = [42, 43, 44];
+    const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => pages.shift(), choose: (items) => items[0] });
+    expect(result).toMatchObject({ id: '44', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/44.webp' });
+    expect(ctx.calls).toHaveLength(7);
+  });
+
+  it('gives up after three dead covers, or at once when the budget runs out', async () => {
+    const dead = [['GET https://static1.hentai-cosplay-xxx.com/', () => new Response('error code: 502', { status: 502 })], ...hentaiFeedRoutes];
+    const pagesFrom = (first) => {
+      let page = first;
+      return { randomInteger: () => page++, choose: (items) => items[0] };
+    };
+    const exhausted = context(dead);
+    await expect(fetchHentaiCosplayXxx({}, exhausted, pagesFrom(7)))
+      .rejects.toMatchObject({ code: 'HTTP_ERROR', status: 502, provider: 'hentai-cosplay-xxx.com' });
+    expect(exhausted.calls).toHaveLength(7);
+
+    const budgeted = context(dead, { http: { budget: new SubrequestBudget(3) } });
+    await expect(fetchHentaiCosplayXxx({}, budgeted, pagesFrom(7))).rejects.toMatchObject({ code: 'BUDGET_EXHAUSTED' });
+    expect(budgeted.calls).toHaveLength(3);
   });
 
   it('extracts Ahottie album covers even with malformed closing tags', () => {
@@ -279,6 +377,20 @@ describe('cosplay feeds', () => {
       <a href="https://ahottie.top/other"><img src="https://images3.imgbox.com/zz/yy/ignored_o.jpg"></a></div>`;
     expect(ahottieMaximumPage(html)).toBe(82);
     expect(extractAhottieMedia(html, 'https://ahottie.top/tags/Cosplay?page=1')).toEqual(['https://images2.imgbox.com/a6/e9/WWEJ8KMs_o.jpg']);
+  });
+
+  it('skips imgbox placeholders and tiny images using the page already read', async () => {
+    const albums = ['A', 'B', 'C'].map((id) => `<a href="https://ahottie.top/albums/${id}"><img src="https://images2.imgbox.com/aa/bb/${id}_o.jpg"></a>`);
+    const placeholder = imageBytes('image/jpeg', 1_200, { width: 240, height: 240 });
+    const ctx = context([
+      ['GET https://ahottie.top/tags/Cosplay?page=1', () => new Response(`<a href="?page=82">82</a>${albums.join('')}`)],
+      ['GET https://images2.imgbox.com/aa/bb/A_o.jpg', () => new Response(placeholder)],
+      ['GET https://images2.imgbox.com/aa/bb/B_o.jpg', () => image('image/jpeg', 2_048, { width: 120, height: 900 })],
+      ['GET https://images2.imgbox.com/aa/bb/C_o.jpg', () => image('image/jpeg', 2_048, { width: 900, height: 1_350 })],
+    ], { http: { placeholders: [{ bytes: 1_200, sha256: await sha256(placeholder) }] } });
+    const result = await fetchAhottie({}, ctx, { randomInteger: () => 1, choose: (items) => items[0] });
+    expect(result).toMatchObject({ provider: 'ahottie.top', url: 'https://images2.imgbox.com/aa/bb/C_o.jpg', contentType: 'image/jpeg' });
+    expect(ctx.calls).toHaveLength(4);
   });
 });
 

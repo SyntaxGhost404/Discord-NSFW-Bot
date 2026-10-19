@@ -9,7 +9,7 @@ export default defineMediaCommand({
   optionName: 'style',
   groups: {
     Anime: [
-      { provider: 'waifuim', tag: 'oppai', isNsfw: true },
+      { provider: 'waifuarchive', tag: 'oppai', isNsfw: true },
       { provider: 'nekobot', type: 'hboobs' },
     ],
     Real: [

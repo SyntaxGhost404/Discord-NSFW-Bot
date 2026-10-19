@@ -6,6 +6,6 @@ export default defineMediaCommand({
   title: 'NSFW Selfie Image',
   sources: [
     { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/selfie' },
-    { provider: 'waifuim', tag: 'selfies', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'selfies', isNsfw: true },
   ],
 });

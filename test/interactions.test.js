@@ -159,13 +159,13 @@ describe('media commands', () => {
 
   it('falls back to another source when one provider fails', async () => {
     mock.route('GET https://api.n-sfw.com/nsfw/ecchi', () => new Response('bad gateway', { status: 502 }));
-    mock.route('GET https://api.waifu.im/images?IncludedTags=ecchi&IsNsfw=True', (request) => {
+    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/images?IncludedTags=ecchi&IsNsfw=True', (request) => {
       expect(request.headers.get('authorization')).toBeNull();
-      return json({ items: [{ url: 'https://cdn.waifu.im/1.jpg' }] });
+      return json({ items: [{ id: 1, url: 'https://waifu-im-shim.trinitymoin.workers.dev/1.jpg', is_nsfw: true }] });
     });
     discordWebhookRoute();
     await send(commandInteraction('ecchi', { userId: '555555555555555558' }));
-    expect((await lastEdit()).payload.embeds[0].image.url).toBe('https://cdn.waifu.im/1.jpg');
+    expect((await lastEdit()).payload.embeds[0].image.url).toBe('https://waifu-im-shim.trinitymoin.workers.dev/1.jpg');
   });
 
   it('reports total failure without charging quota, then refreshes with the chosen style', async () => {

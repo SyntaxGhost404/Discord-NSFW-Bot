@@ -5,6 +5,6 @@ export default defineMediaCommand({
   description: 'Delivers a random Uniform image',
   title: 'NSFW Uniform Image',
   sources: [
-    { provider: 'waifuim', tag: 'uniform', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'uniform', isNsfw: true },
   ],
 });

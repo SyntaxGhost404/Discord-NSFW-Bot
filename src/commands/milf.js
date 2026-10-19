@@ -6,6 +6,6 @@ export default defineMediaCommand({
   title: 'NSFW Milf Image',
   sources: [
     { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/milf' },
-    { provider: 'waifuim', tag: 'milf', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'milf', isNsfw: true },
   ],
 });

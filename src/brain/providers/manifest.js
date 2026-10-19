@@ -9,7 +9,7 @@ export const ProviderEndpoint = Object.freeze({
   WAIFU_PICS: 'https://api.waifu.pics/nsfw/{category}',
   N_SFW: 'https://api.n-sfw.com/nsfw/{category}',
   N_SFW_MEDIA_HOST: 'data.n-sfw.com',
-  WAIFU_IM: 'https://api.waifu.im/images',
+  WAIFU_ARCHIVE: 'https://waifu-im-shim.trinitymoin.workers.dev/images',
   SEX_COM_SEARCH: 'https://www.sex.com/portal/api/gifs/search',
   SEX_COM_WATCH: 'https://www.sex.com/pin/{id}/',
   SEX_COM_CDN: 'https://imagex1.sx.cdn.live{uri}',
@@ -18,6 +18,7 @@ export const ProviderEndpoint = Object.freeze({
   PORNGIFS_MEDIA: 'https://cdn.porngifs.com/img/{id}',
   PORNGIFS_TV: 'https://porngifs.tv/?action=ajax&mode=async&function=get_block&block_id=list_videos_most_recent_videos&sort_by=post_date&from={page}',
   PORNPICS_BUTTPLUG_FEED: 'https://www.pornpics.com/butt-plug/',
+  HENTAI_COSPLAY_FIRST_PAGE: 'https://hentai-cosplay-xxx.com/search/',
   HENTAI_COSPLAY_FEED: 'https://hentai-cosplay-xxx.com/search/page/{page}/',
   AHOTTIE_COSPLAY_FEED: 'https://ahottie.top/tags/Cosplay?page={page}',
 });

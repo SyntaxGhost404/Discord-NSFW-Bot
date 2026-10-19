@@ -6,7 +6,7 @@ export default defineMediaCommand({
   title: 'NSFW Paizuri Image',
   sources: [
     { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/paizuri' },
-    { provider: 'waifuim', tag: 'paizuri', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'paizuri', isNsfw: true },
     { provider: 'nekobot', type: 'paizuri' },
   ],
 });

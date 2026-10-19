@@ -6,6 +6,6 @@ export default defineMediaCommand({
   title: 'NSFW Ecchi Image',
   sources: [
     { provider: 'abd', endpoint: 'https://api.n-sfw.com/nsfw/ecchi' },
-    { provider: 'waifuim', tag: 'ecchi', isNsfw: true },
+    { provider: 'waifuarchive', tag: 'ecchi', isNsfw: true },
   ],
 });

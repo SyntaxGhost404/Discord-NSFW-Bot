@@ -25,13 +25,16 @@ Every provider request goes through `MediaHttpClient`
 - **Images.** A download that will be uploaded must start with JPEG, PNG, GIF,
   or WebP magic bytes, whatever its `Content-Type` says, because Discord embeds
   only those formats. This also keeps HTML block pages served with status
-  `200` from being posted.
+  `200` from being posted. A download that matches a known "image
+  unavailable" placeholder (`KNOWN_PLACEHOLDERS` in `http.js`, matched by size
+  and SHA-256) is rejected too, and an adapter can require a minimum pixel
+  size, read from the image header without decoding it.
 - **Delivery.** URL results are put straight into the embed and Discord fetches
   them. Downloaded results are uploaded with the edit as `media.<ext>` and
   referenced as `attachment://media.<ext>`. The Link button always opens the
   provider's URL.
-- **Credentials.** Only NekoBot and Waifu.im receive a secret, and only in
-  their own headers. Media hosts never receive credentials, and the Discord bot
+- **Credentials.** Only NekoBot receives a secret, and only in its own
+  header. Media hosts never receive credentials, and the Discord bot
   token is never sent to a provider.
 
 Failures fall through to the command's next source. See
@@ -97,15 +100,30 @@ Categories used: `anal`, `ass`, `blowjob`, `breeding`, `buttplug`, `cages`,
 `ecchi`, `feet`, `legs`, `masturbation`, `milf`, `neko`, `paizuri`,
 `petgirls`, `selfie`, `smothering`, `socks`, and `yuri`.
 
-## Waifu.im
+## Waifu archive (self-hosted Waifu.im library)
 
-`GET https://api.waifu.im/images?IncludedTags={tag}&IsNsfw=True` with
-`Accept-Version: v7`, embedded by URL from `items[0].url`. When
-`WAIFU_IM_KEY` is set, `Authorization: ApiKey {WAIFU_IM_KEY}` is added;
-anonymous requests also work.
+Waifu.im shut down on 17–18 October 2026. Its sources now use a self-hosted
+copy of the full Waifu.im library: 4,279 images from the maintainer's final
+database export, stored in R2 and served by the `waifu-im-shim` Worker. No key
+is needed.
 
-Tags used: `ass`, `ecchi`, `ero`, `hentai`, `maid`, `milf`, `oppai`, `oral`,
-`paizuri`, `selfies`, `uniform`, and `waifu`.
+`GET https://waifu-im-shim.trinitymoin.workers.dev/images?IncludedTags={tag}&IsNsfw=True`
+returns up to five random matches in the Waifu.im v7 shape:
+
+```json
+{ "items": [{ "id": 337, "url": "https://waifu-im-shim.trinitymoin.workers.dev/337.jpeg", "is_nsfw": true }] }
+```
+
+The adapter (`src/brain/providers/waifu-archive.js`) accepts only items whose
+`url` is HTTPS on the archive's own host with an `/{id}.{ext}` image path, and
+embeds the first one by URL. Images are served from `/{id}.{ext}` with
+immutable caching. The archive ignores `Accept-Version` and `Authorization`,
+so neither is sent.
+
+Tags used, with the number of NSFW images each has in the archive: `ass`
+(414), `ecchi` (2,138), `ero` (3,014), `hentai` (883), `maid` (191), `milf`
+(468), `oppai` (956), `oral` (145), `paizuri` (146), `selfies` (178),
+`uniform` (274), and `waifu` (3,024).
 
 ## Waifu.pics
 
@@ -197,9 +215,19 @@ read the feed's page count, pick a random page, choose one image on it,
 download it, and upload it as an attachment. Gallery and album pages are never
 opened.
 
+Many album covers on both feeds are dead, so every download is checked before
+it is used. It must be a JPEG, PNG, GIF, or WebP of at least 1 KiB, at least
+300 pixels in each direction, and not a known placeholder. A rejected image
+is replaced by another one, up to three images per provider, and only then
+does the command move on. The rejections are logged at `debug` level as
+"Rejected a cosplay image; trying another."
+
 ### Hentai-cosplay-xxx.com
 
-Feed: `https://hentai-cosplay-xxx.com/search/page/{page}/`.
+Feed: `https://hentai-cosplay-xxx.com/search/page/{page}/`, with page 1
+requested at its final address, `https://hentai-cosplay-xxx.com/search/`
+(the numbered address redirects there, and every redirect hop counts as a
+subrequest).
 
 The page count comes from the `a.last` pagination link, falling back to the
 highest page link. Images are taken only from `ul#image-list`, preferring
@@ -210,6 +238,13 @@ subdomains are accepted. The download sends
 `Referer: https://hentai-cosplay-xxx.com/`, because the image CDN refuses
 hotlinks without it.
 
+Each page's covers usually sit on one image server (`static`, `static2`, …,
+`static17`), and in October 2026 four of them (`static10`, `static11`,
+`static13`, and `static15`) answered `502` for all or nearly all files, about
+a quarter of all covers. A retry therefore reads a new random page instead of trying
+another cover on the same one. In a live test, 15 of 15 requests delivered a
+real photo, 6 of them after a retry.
+
 ### Ahottie.top
 
 Feed: `https://ahottie.top/tags/Cosplay?page={page}`.
@@ -219,6 +254,15 @@ taken only from inside `/albums/…` links, scanning a bounded window after
 each link so that pages over a megabyte stay cheap on CPU. Imgbox thumbnails
 (`thumbsN.imgbox.com/…_t.jpg`) are promoted to their originals
 (`imagesN.imgbox.com/…_o.jpg`), and only Imgbox hosts are downloaded from.
+Retries use other images from the page already read, because each page is
+over a megabyte of HTML.
+
+In October 2026 imgbox answered every tested image, thumbnail or original,
+with the same 8,091-byte, 240×240 "Thumbnail Temporarily Unavailable" JPEG,
+and `imgbox.com` itself reported "under heavy load". That image is the first
+entry in `KNOWN_PLACEHOLDERS`, so Ahottie now fails cleanly instead of
+posting it, and it starts working again by itself once imgbox serves real
+files.
 
 ## PornPics.com
 
@@ -255,11 +299,11 @@ is only reachable that way.
 | `/4k` | | NekoBot `4k` |
 | `/anal` | `style: Anime` | Purrbot `anal/gif`, N-SFW `anal`, NekoBot `hentai_anal`, Nekos API `anal` |
 | `/anal` | `style: Real` | NekoBot `anal` |
-| `/ass` | `style: Anime` | N-SFW `ass`, Waifu.im `ass`, NekoBot `hass` |
+| `/ass` | `style: Anime` | N-SFW `ass`, Waifu archive `ass`, NekoBot `hass` |
 | `/ass` | `style: Real` | Obutts, NekoBot `ass` |
-| `/blowjob` | `style: Anime` | Purrbot `blowjob/gif`, Waifu.pics `blowjob`, N-SFW `blowjob`, Waifu.im `oral` |
+| `/blowjob` | `style: Anime` | Purrbot `blowjob/gif`, Waifu.pics `blowjob`, N-SFW `blowjob`, Waifu archive `oral` |
 | `/blowjob` | `style: Real` | NekoBot `blowjob` |
-| `/boobs` | `style: Anime` | Waifu.im `oppai`, NekoBot `hboobs` |
+| `/boobs` | `style: Anime` | Waifu archive `oppai`, NekoBot `hboobs` |
 | `/boobs` | `style: Real` | Oboobs, NekoBot `boobs` |
 | `/breeding` | | N-SFW `breeding` |
 | `/buttplug` | `style: Anime` | N-SFW `buttplug` |
@@ -267,25 +311,25 @@ is only reachable that way.
 | `/cages` | | N-SFW `cages` |
 | `/cosplay` | | Hentai-cosplay-xxx, then Ahottie |
 | `/cum` | | Purrbot `cum/gif` |
-| `/ecchi` | | N-SFW `ecchi`, Waifu.im `ecchi` |
-| `/ero` | | Waifu.im `ero` |
+| `/ecchi` | | N-SFW `ecchi`, Waifu archive `ecchi` |
+| `/ero` | | Waifu archive `ero` |
 | `/feet` | `style: Anime` | N-SFW `feet` |
 | `/feet` | `style: Real` | NekoBot `feet` |
 | `/fuck` | | Purrbot `fuck/gif` |
 | `/gif` | | Sex.com, Porngifs.com, NekoBot `pgif`, Porngifs.tv |
 | `/gonewild` | | NekoBot `gonewild` |
-| `/hentai` | | Waifu.im `hentai`, NekoBot `hentai` |
+| `/hentai` | | Waifu archive `hentai`, NekoBot `hentai` |
 | `/kitsune` | | NekoBot `hkitsune` |
 | `/legs` | | N-SFW `legs` |
-| `/maid` | | Waifu.im `maid`, Nekos API `maid` |
+| `/maid` | | Waifu archive `maid`, Nekos API `maid` |
 | `/midriff` | | NekoBot `hmidriff` |
-| `/milf` | | N-SFW `milf`, Waifu.im `milf` |
+| `/milf` | | N-SFW `milf`, Waifu archive `milf` |
 | `/neko` | | Purrbot `neko/gif`, Purrbot `neko/img`, Waifu.pics `neko`, N-SFW `neko`, Nekos API `catgirl`, NekoBot `lewdneko` |
-| `/paizuri` | | N-SFW `paizuri`, Waifu.im `paizuri`, NekoBot `paizuri` |
+| `/paizuri` | | N-SFW `paizuri`, Waifu archive `paizuri`, NekoBot `paizuri` |
 | `/petgirls` | | N-SFW `petgirls` |
 | `/pussy` | | Nekos API `pussy`, NekoBot `pussy` |
 | `/pussylick` | | Purrbot `pussylick/gif` |
-| `/selfie` | | N-SFW `selfie`, Waifu.im `selfies` |
+| `/selfie` | | N-SFW `selfie`, Waifu archive `selfies` |
 | `/smothering` | | N-SFW `smothering` |
 | `/socks` | | N-SFW `socks` |
 | `/solo` | `gender: female` | Purrbot `solo/gif`, N-SFW `masturbation` |
@@ -298,8 +342,8 @@ is only reachable that way.
 | `/threesome` | `type: ffm` | Purrbot `threesome_ffm/gif` |
 | `/threesome` | `type: mmf` | Purrbot `threesome_mmf/gif` |
 | `/threesome` | none (random group) | Nekos API `threesome` |
-| `/uniform` | | Waifu.im `uniform` |
-| `/waifu` | | Waifu.pics `waifu`, Waifu.im `waifu` |
+| `/uniform` | | Waifu archive `uniform` |
+| `/waifu` | | Waifu.pics `waifu`, Waifu archive `waifu` |
 | `/yuri` | | Purrbot `yuri/gif`, N-SFW `yuri`, NekoBot `hyuri`, Nekos API `yuri` |
 
 `test/commands.test.js` asserts this exact mapping, and

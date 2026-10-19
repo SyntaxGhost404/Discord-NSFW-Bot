@@ -21,48 +21,49 @@ const purr = (path) => `purrbot:https://api.purrbot.site/v2/img/nsfw/${path}`;
 const abd = (category) => `abd:https://api.n-sfw.com/nsfw/${category}`;
 const nekoBot = (type) => `nekobot:type=${type}`;
 const nekos = (tag) => `nekosv4:https://api.nekosapi.com/v4/images/random?limit=1&rating=explicit,suggestive&tags=${tag}`;
-const waifuIm = (tag) => `waifuim:tag=${tag}`;
+const waifuArchive = (tag) => `waifuarchive:tag=${tag}`;
 const waifuPics = (category) => `waifupics:https://api.waifu.pics/nsfw/${category}`;
 
 // The complete command-to-provider mapping, carried over from the previous
-// runtime with Purrbot moved to its non-deprecated v2 host.
+// runtime with Purrbot moved to its v2 host and the Waifu.im sources moved to
+// the self-hosted Waifu archive after Waifu.im shut down.
 const expectedCommandSources = {
   '4k': { all: [nekoBot('4k')] },
   anal: { Anime: [purr('anal/gif'), abd('anal'), nekoBot('hentai_anal'), nekos('anal')], Real: [nekoBot('anal')] },
-  ass: { Anime: [abd('ass'), waifuIm('ass'), nekoBot('hass')], Real: ['obutts', nekoBot('ass')] },
-  blowjob: { Anime: [purr('blowjob/gif'), waifuPics('blowjob'), abd('blowjob'), waifuIm('oral')], Real: [nekoBot('blowjob')] },
-  boobs: { Anime: [waifuIm('oppai'), nekoBot('hboobs')], Real: ['oboobs', nekoBot('boobs')] },
+  ass: { Anime: [abd('ass'), waifuArchive('ass'), nekoBot('hass')], Real: ['obutts', nekoBot('ass')] },
+  blowjob: { Anime: [purr('blowjob/gif'), waifuPics('blowjob'), abd('blowjob'), waifuArchive('oral')], Real: [nekoBot('blowjob')] },
+  boobs: { Anime: [waifuArchive('oppai'), nekoBot('hboobs')], Real: ['oboobs', nekoBot('boobs')] },
   breeding: { all: [abd('breeding')] },
   buttplug: { Anime: [abd('buttplug')], Real: ['pornpics:https://www.pornpics.com/butt-plug/'] },
   cages: { all: [abd('cages')] },
   cosplay: { all: ['hentaicosplayxxx', 'ahottie'] },
   cum: { all: [purr('cum/gif')] },
-  ecchi: { all: [abd('ecchi'), waifuIm('ecchi')] },
-  ero: { all: [waifuIm('ero')] },
+  ecchi: { all: [abd('ecchi'), waifuArchive('ecchi')] },
+  ero: { all: [waifuArchive('ero')] },
   feet: { Anime: [abd('feet')], Real: [nekoBot('feet')] },
   fuck: { all: [purr('fuck/gif')] },
   gif: { all: ['sexcom:niches=31', 'porngifs', nekoBot('pgif'), 'porngifstv'] },
   gonewild: { all: [nekoBot('gonewild')] },
-  hentai: { all: [waifuIm('hentai'), nekoBot('hentai')] },
+  hentai: { all: [waifuArchive('hentai'), nekoBot('hentai')] },
   kitsune: { all: [nekoBot('hkitsune')] },
   legs: { all: [abd('legs')] },
-  maid: { all: [waifuIm('maid'), nekos('maid')] },
+  maid: { all: [waifuArchive('maid'), nekos('maid')] },
   midriff: { all: [nekoBot('hmidriff')] },
-  milf: { all: [abd('milf'), waifuIm('milf')] },
+  milf: { all: [abd('milf'), waifuArchive('milf')] },
   neko: { all: [purr('neko/gif'), purr('neko/img'), waifuPics('neko'), abd('neko'), nekos('catgirl'), nekoBot('lewdneko')] },
-  paizuri: { all: [abd('paizuri'), waifuIm('paizuri'), nekoBot('paizuri')] },
+  paizuri: { all: [abd('paizuri'), waifuArchive('paizuri'), nekoBot('paizuri')] },
   petgirls: { all: [abd('petgirls')] },
   pussy: { all: [nekos('pussy'), nekoBot('pussy')] },
   pussylick: { all: [purr('pussylick/gif')] },
-  selfie: { all: [abd('selfie'), waifuIm('selfies')] },
+  selfie: { all: [abd('selfie'), waifuArchive('selfies')] },
   smothering: { all: [abd('smothering')] },
   socks: { all: [abd('socks')] },
   solo: { female: [purr('solo/gif'), abd('masturbation')], male: [purr('solo_male/gif')], nekosv4: [nekos('masturbating')] },
   tentacle: { all: [nekoBot('tentacle')] },
   thigh: { Anime: [nekoBot('hthigh')], Real: [nekoBot('thigh')] },
   threesome: { fff: [purr('threesome_fff/gif')], ffm: [purr('threesome_ffm/gif')], mmf: [purr('threesome_mmf/gif')], nekosv4: [nekos('threesome')] },
-  uniform: { all: [waifuIm('uniform')] },
-  waifu: { all: [waifuPics('waifu'), waifuIm('waifu')] },
+  uniform: { all: [waifuArchive('uniform')] },
+  waifu: { all: [waifuPics('waifu'), waifuArchive('waifu')] },
   yuri: { all: [purr('yuri/gif'), abd('yuri'), nekoBot('hyuri'), nekos('yuri')] },
 };
 

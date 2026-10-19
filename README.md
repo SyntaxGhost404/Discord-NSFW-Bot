@@ -97,7 +97,6 @@ Discord application with a bot user.
    npx wrangler secret put DISCORD_PUBLIC_KEY
    npx wrangler secret put DISCORD_BOT_TOKEN
    npx wrangler secret put NEKOBOT_AUTHORIZATION
-   npx wrangler secret put WAIFU_IM_KEY   # optional
    ```
 
 3. Deploy:
@@ -134,7 +133,6 @@ Secrets (set with `wrangler secret put`, or in `.dev.vars` locally):
 | `DISCORD_PUBLIC_KEY` | yes | Ed25519 key used to verify interaction requests. |
 | `DISCORD_BOT_TOKEN` | yes | Command registration, Gateway session, mention replies, `/ping` (legacy `BOT_TOKEN` accepted). |
 | `NEKOBOT_AUTHORIZATION` | for NekoBot | `Authorization` header for nekobot.xyz; without it NekoBot sources are skipped. |
-| `WAIFU_IM_KEY` | no | Sent to Waifu.im when set; Waifu.im also works anonymously. |
 
 Variables (in `wrangler.jsonc` → `vars`):
 
