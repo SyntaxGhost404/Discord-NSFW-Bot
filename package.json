@@ -9,6 +9,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "register": "node scripts/register-commands.mjs",
+    "catalog:cosplay": "node scripts/build-cosplay-catalog.mjs",
     "tail": "wrangler tail",
     "check": "node scripts/check.mjs",
     "test": "vitest run",

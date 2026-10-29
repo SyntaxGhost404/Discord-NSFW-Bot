@@ -242,8 +242,8 @@ as an attachment. Up to three pages are tried.
 ## Cosplay feeds
 
 `/cosplay` uses Hentai-cosplay-xxx. Ahottie is a fallback that is off unless
-`AHOTTIE=true`, because its images are currently dead (see below). Each finds
-a random image in a listing, downloads it, and uploads it as an attachment.
+`AHOTTIE=true`, because its images are currently dead (see below). Each
+chooses a random image, downloads it, and uploads it as an attachment.
 Gallery and album pages are never opened, and nothing is read before a user
 asks.
 
@@ -258,25 +258,52 @@ does the command move on. The rejections are logged at `debug` level as
 
 The site lists every image in gzip-compressed image sitemaps
 (`robots.txt` → `sitemap_index_images_detail.xml` →
-`https://hentai-cosplay-xxx.com/sitemap_images_detail_{file}.xml.gz`, files
-1 to 708). Each file covers 500 albums in upload order, and the files are
-cached at Cloudflare's edge, so one answers in about 0.2–0.6 seconds. A feed
-page, built on demand, takes 0.5–4.5 seconds.
+`https://hentai-cosplay-xxx.com/sitemap_images_detail_{file}.xml.gz`, 708
+files of about 500 albums each, in upload order). Each image entry carries
+twelve language links, a title, and a caption, so a file unpacks to 4–16 MB
+of XML, and unpacking one costs 4–17 ms of CPU: more than a Free-plan request
+may use, so the bot cannot read whole files while a user waits.
 
-1. Pick a random file from 1 to 708 and read only its first 96 KiB of XML
-   (a few KB of gzip), then cancel the transfer. That holds a few hundred
-   images from the file's first albums and keeps parsing to about 2 ms of
-   CPU. Because the files run in upload order, every period of the site is
-   sampled.
-2. Take the `<image:loc>` URLs, remove `/p={width}/` and
-   `/p={width}x{height}/` resize segments, and keep only HTTPS images on
-   `hentai-cosplay-xxx.com` and its subdomains.
-3. Download one at random with `Referer: https://hentai-cosplay-xxx.com/`,
-   because the image CDN refuses hotlinks without it, and check it as below.
+**Album catalog (main path).** `npm run catalog:cosplay`
+(`scripts/build-cosplay-catalog.mjs`) reads every sitemap once and writes
+`src/brain/providers/cosplay-catalog.txt`, the list of every album. Image
+URLs follow `https://static{n}.hentai-cosplay-xxx.com/upload/{yyyymmdd}/{group}/{album}/{number}.{ext}`,
+so an album needs only its server, date, group, ID, and image numbers: about
+10 bytes. The sitemaps split large albums into entries of 100 images; those
+count once. The script reads listings only, never images. The catalog built
+on 29 October 2026 holds 312,399 albums and 12.5 million images in 3.3 MB.
 
-If no sitemap can be read, or one lists no usable image, the provider reads
-feed pages instead and logs "Cosplay sitemaps are unavailable; reading feed
-pages instead." The feed is `https://hentai-cosplay-xxx.com/search/page/{page}/`,
+The catalog ships as a text module, so it is never parsed as code. A request
+picks a random album, every album equally likely, and a random image in it,
+which costs well under a millisecond of CPU (it decodes one line of at most
+32 albums). It downloads that image with
+`Referer: https://hentai-cosplay-xxx.com/`, because the image CDN refuses
+hotlinks without it, and checks it as below. No listing is read. In a live
+test on 29 October 2026, 15 of 15 requests delivered a photo with a single
+request each, with a median of 0.39 seconds (the sitemap method below: 0.94
+seconds), from albums uploaded between 2016 and 2025.
+
+The site adds about 1,300 albums a month; they appear once the catalog is
+rebuilt (see [Refreshing the /cosplay catalog](./README.md#refreshing-the-cosplay-catalog)).
+An album the site has removed fails the download check, and another one is
+picked. If two catalog images in one request are gone from the site, the
+catalog is probably out of date: the rest of that request reads the live
+sitemaps and logs "Cosplay catalog images are missing on the site; reading
+the sitemaps instead."
+
+**Live sitemaps (fallback).** The provider picks a random file from 1 to 708,
+reads only its first 96 KiB of XML (a few KB of gzip), and cancels the
+transfer. It takes the `<image:loc>` URLs, removes `/p={width}/` and
+`/p={width}x{height}/` resize segments, keeps only HTTPS images on
+`hentai-cosplay-xxx.com` and its subdomains, and downloads one at random. The
+files are cached at Cloudflare's edge and answer in about 0.2–0.6 seconds,
+but a prefix reaches only each file's first ten or so albums, about 2% of
+the site.
+
+**Feed pages (last resort).** If no sitemap can be read, or one lists no
+usable image, the provider reads feed pages instead and logs "Cosplay
+sitemaps are unavailable; reading feed pages instead." A feed page is built
+on demand and takes 0.5–4.5 seconds. The feed is `https://hentai-cosplay-xxx.com/search/page/{page}/`,
 with page 1 requested at its final address,
 `https://hentai-cosplay-xxx.com/search/` (the numbered address redirects
 there, and every redirect hop counts as a subrequest). The page count comes
@@ -285,14 +312,11 @@ and is remembered for an hour. Images are taken only from `ul#image-list`,
 preferring `data-original`/`data-full`, then the largest `srcset` entry, then
 lazy and plain `src` attributes.
 
-A listing's images usually sit on one image server (`static`, `static2`, …,
-`static17`), and in October 2026 four of them (`static10`, `static11`,
+The images are spread over 17 image servers (`static`, `static2`, …,
+`static17`). Earlier in October 2026, four of them (`static10`, `static11`,
 `static13`, and `static15`) answered `502` for all or nearly all files. When
-a download fails that way, the server is skipped for ten minutes, and a retry
-reads a new random listing instead of another image from the same server.
-In a live test on 29 October 2026, 10 of 10 requests delivered a photo, with
-a median of 0.94 seconds and a 90th percentile of 1.9 seconds, each from one
-sitemap read and one image download.
+a download fails that way, the server is skipped for ten minutes, and the
+next image comes from an album on another server.
 
 ### Ahottie.top
 

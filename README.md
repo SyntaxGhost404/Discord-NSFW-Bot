@@ -32,12 +32,16 @@ WebSockets) plus Workers bindings.
   `UserQuota` Durable Object, so DMs, group DMs, and every server share one
   strongly consistent quota. Capacity is reserved before any provider is
   contacted and charged only when media is actually displayed.
-- **Fast `/cosplay` without background work.** The cosplay site takes
-  0.5–4.5 seconds to build a feed page, so `/cosplay` reads the start of one
-  of the site's image sitemaps instead. They are cached at Cloudflare's edge,
-  only a few KB is transferred, and a request takes about a second in total.
+- **Every `/cosplay` album, with nothing to look up.** The bot ships a
+  catalog of all ~312,000 albums on the cosplay site
+  (`src/brain/providers/cosplay-catalog.txt`), so a request picks a random
+  album and image in well under a millisecond and downloads only that image,
+  about half a second in total. The site's own listings are too large to
+  read within the Free plan's CPU limit, so the catalog is built from them
+  ahead of time (see [Refreshing the `/cosplay` catalog](#refreshing-the-cosplay-catalog)).
 - **Media is fetched only for a request.** Nothing is prefetched or refreshed
-  in the background. Each isolate remembers only small facts its own requests
+  in the background, and the `/cosplay` catalog is rebuilt only when you run
+  its script. Each isolate remembers only small facts its own requests
   learned, such as a gallery's size or an image server that is down.
 - **Optional Gateway presence.** A `DiscordGateway` Durable Object keeps one
   outbound Gateway WebSocket per shard so the bot appears online and answers a
@@ -136,6 +140,26 @@ that process. With an Interactions Endpoint URL configured, Discord no longer
 delivers interactions over the Gateway, but an old process would still answer
 mentions and hold a Gateway session.
 
+## Refreshing the `/cosplay` catalog
+
+`/cosplay` picks from `src/brain/providers/cosplay-catalog.txt`, a list of
+every album in hentai-cosplay-xxx.com's image sitemaps. The site adds about
+1,300 albums a month, and the catalog includes them after a rebuild, so
+refresh it every month or so:
+
+```sh
+npm run catalog:cosplay -- --cache ../cosplay-sitemaps
+npm run deploy
+```
+
+The script reads only the sitemap listings (about 180 MB of gzip from some
+700 files), never images, and takes a few minutes. It replaces the catalog
+only when every sitemap could be read; a file that the site's index lists but
+does not serve is left out with a warning. `--cache` keeps the downloads in a
+directory outside the repository for a day, so an interrupted run can resume.
+Albums the site has removed since the last build need no action: their
+download fails the image check and another album is picked.
+
 ## Configuration
 
 Secrets (set with `wrangler secret put`, or in `.dev.vars` locally):
@@ -172,9 +196,10 @@ to `"true"` and redeploying brings it back:
 Everything runs on the Workers Free plan, with these trade-offs:
 
 - **CPU:** Free invocations get 10 ms of CPU. JSON providers use about 1–2 ms.
-  The scraping sources (`/cosplay`, `/buttplug` Real, `/gif`) use more, so
-  they read as little as possible: `/cosplay` unpacks only the first 96 KB of
-  a sitemap. The Paid plan's 30-second default removes that concern.
+  The scraping sources (`/buttplug` Real, `/gif`) use more, so they read as
+  little as possible, and `/cosplay` picks from its bundled catalog in well
+  under a millisecond. The Paid plan's 30-second default removes that
+  concern.
 - **Subrequests:** Free invocations may make 50. `MAX_SUBREQUESTS=45` keeps
   room for the Discord edit; on Paid you can raise it.
 - **Gateway duration:** an open Gateway WebSocket keeps its Durable Object

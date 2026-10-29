@@ -106,9 +106,9 @@ image by magic bytes so block pages served as `200` are never uploaded. A
 provider must send its response headers within 4 seconds (8 for the cosplay
 feed pages), so a stalled host fails over without waiting out the full
 timeout. `textPrefix()` reads only the start of a file, unpacking gzip on the
-way, and cancels the rest of the transfer; `/cosplay` uses it for the site's
-image sitemaps. Only
-JPEG, PNG, GIF, and WebP are accepted, because Discord embeds only those.
+way, and cancels the rest of the transfer; `/cosplay` uses it when it falls
+back to the site's image sitemaps. Only JPEG, PNG, GIF, and WebP are
+accepted, because Discord embeds only those.
 Downloads that match a known "image unavailable" placeholder are rejected,
 and `/cosplay` also requires at least 300 pixels in each direction, read from
 the image header. It retries with other images, and its Ahottie fallback is
@@ -145,9 +145,23 @@ only:
   feed's page count, for an hour;
 - the provider circuit breaker below.
 
-The Waifu archive's index is bundled with the code
-(`src/brain/providers/waifu-archive-index.js`), because the archive is
-frozen. Image bytes are never cached.
+Two lists ship with the code instead of being looked up per request:
+
+- **Waifu archive index** (`src/brain/providers/waifu-archive-index.js`),
+  built from the archive's database export; the archive is frozen.
+- **Cosplay album catalog** (`src/brain/providers/cosplay-catalog.txt`):
+  every album in hentai-cosplay-xxx.com's image sitemaps, built by
+  `npm run catalog:cosplay` when the maintainer runs it. Those sitemaps
+  unpack to 4–16 MB per file, which no Free-plan request could read, while
+  the catalog is 3.3 MB for all ~312,000 albums. It is a text module, so the
+  Worker never parses it as code. `src/runtime.js` wraps it with
+  `createCosplayCatalog()` (`cosplay-catalog.js`) and passes it to the
+  provider through the request context, which keeps it out of Node scripts
+  such as `npm run register`. A pick reads the index line, jumps to one
+  line of at most 32 albums, and decodes only that; the format is described
+  at the top of `cosplay-catalog.js`.
+
+Image bytes are never cached.
 
 ## Quotas
 

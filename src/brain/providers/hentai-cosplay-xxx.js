@@ -1,6 +1,7 @@
 import { ProviderEndpoint } from './manifest.js';
 import { mediaResult } from './media-result.js';
 import { MediaProviderError, providerError } from './errors.js';
+import { EMPTY_COSPLAY_CATALOG } from './cosplay-catalog.js';
 import {
   cleanHentaiCosplayUrl,
   downloadCosplayImage,
@@ -15,15 +16,19 @@ import {
 import { choose, randomInteger } from '../../lib/random.js';
 
 const PROVIDER = 'hentai-cosplay-xxx.com';
-// Images tried per request, and listings read to find them. Several of the
-// site's image servers answer 502 for every file, and a listing's images
-// usually sit on one server, so a failed server means reading a new listing.
+// Images tried per request, and listings read to find them when the catalog
+// cannot help. Several of the site's image servers answer 502 for every
+// file, so a server that fails is skipped for a while.
 const MAXIMUM_DOWNLOADS = 3;
 const MAXIMUM_LISTINGS = 3;
-// The image sitemaps list every image of 500 albums each, in upload order,
-// and are cached at the edge; feed pages are built on demand and take
-// 0.5-4.5 seconds. A sitemap unpacks to about 5 MB, so only its start is
-// read: about 2 ms of CPU for a few hundred images from 5-15 albums.
+// After this many catalog images turn out to be gone from the site in one
+// request, the rest of it reads the live sitemaps: the catalog is probably
+// out of date.
+const CATALOG_MISSES = 2;
+// The fallback reads the image sitemaps, which list every image of 500
+// albums each, in upload order, and are cached at the edge; feed pages are
+// built on demand and take 0.5-4.5 seconds. A sitemap unpacks to 4-16 MB,
+// so only its start is read: about 2 ms of CPU for the first ten albums.
 const SITEMAP_FILES = 708;
 const SITEMAP_PREFIX_BYTES = 96 * 1024;
 const SITEMAP_IMAGE = /<image:loc>\s*([^<\s]+)\s*<\/image:loc>/g;
@@ -61,10 +66,12 @@ const HENTAI_COSPLAY_FEED = Object.freeze({
 // failed, and the feed's page count for the fallback path.
 const deadHosts = new Map();
 let feedCeiling = null;
+let reportedUnreadableCatalog = false;
 
 export function resetHentaiCosplayStateForTests() {
   deadHosts.clear();
   feedCeiling = null;
+  reportedUnreadableCatalog = false;
 }
 
 function hostOf(url) {
@@ -82,6 +89,10 @@ function isDead(url, now) {
   if (until > now) return true;
   deadHosts.delete(host);
   return false;
+}
+
+function isMissing(error) {
+  return error?.code === 'HTTP_ERROR' && (error.status === 404 || error.status === 410);
 }
 
 function markDead(url, now) {
@@ -118,12 +129,22 @@ async function readFeedImages(http, dependencies) {
   return { listing: `feed page ${page}`, urls: await readFeedPage(http, HENTAI_COSPLAY_FEED, page) };
 }
 
-// Finds a random image in a random image sitemap, falling back to the feed
-// pages if the sitemaps are missing or change format, and downloads and checks
-// it before use. Gallery pages are never opened.
+// Picks a random album from the bundled catalog of every album on the site
+// (cosplay-catalog.txt) and a random image in it, so no listing is read
+// while the user waits. If the catalog cannot supply a usable image, the
+// live image sitemaps are read instead, and the feed pages after them. Every
+// image is downloaded and checked before use; gallery pages are never opened.
 export async function fetchHentaiCosplayXxx(_source, context, dependencies = defaultDependencies) {
   try {
+    const catalog = dependencies.catalog ?? context.cosplayCatalog ?? EMPTY_COSPLAY_CATALOG;
+    if (context.cosplayCatalog && catalog.albums === 0 && !reportedUnreadableCatalog) {
+      reportedUnreadableCatalog = true;
+      context.logger?.warn('The bundled cosplay catalog is empty or unreadable; reading the sitemaps instead.', { provider: PROVIDER });
+    }
     const attempted = new Set();
+    const acceptable = (url) => !attempted.has(url) && !isDead(url, Date.now());
+    let useCatalog = true;
+    let catalogMisses = 0;
     let useSitemaps = true;
     let listings = 0;
     let downloads = 0;
@@ -135,40 +156,52 @@ export async function fetchHentaiCosplayXxx(_source, context, dependencies = def
       useSitemaps = false;
     };
     while (downloads < MAXIMUM_DOWNLOADS) {
-      const usable = () => candidates.filter((url) => !attempted.has(url) && !isDead(url, Date.now()));
-      if (usable().length === 0) {
-        if (listings >= MAXIMUM_LISTINGS) break;
-        listings += 1;
-        try {
-          ({ listing, urls: candidates } = useSitemaps
-            ? await readSitemapImages(context.http, dependencies)
-            : await readFeedImages(context.http, dependencies));
-        } catch (error) {
-          lastError = error;
-          if (STOP_CODES.has(error?.code)) break;
-          leaveSitemaps({ code: error?.code, status: error?.status });
-          continue;
+      const picked = useCatalog ? catalog.pick(dependencies.randomInteger, acceptable) : null;
+      let choice = picked ? { url: picked.url, id: `album ${picked.album}`, fromCatalog: true } : null;
+      if (!choice) {
+        useCatalog = false;
+        const usable = () => candidates.filter(acceptable);
+        if (usable().length === 0) {
+          if (listings >= MAXIMUM_LISTINGS) break;
+          listings += 1;
+          try {
+            ({ listing, urls: candidates } = useSitemaps
+              ? await readSitemapImages(context.http, dependencies)
+              : await readFeedImages(context.http, dependencies));
+          } catch (error) {
+            lastError = error;
+            if (STOP_CODES.has(error?.code)) break;
+            leaveSitemaps({ code: error?.code, status: error?.status });
+            continue;
+          }
+          if (candidates.length === 0) {
+            leaveSitemaps({ listing, code: 'INVALID_RESPONSE' });
+            lastError = new MediaProviderError(`${PROVIDER} ${listing} listed no usable image.`, { code: 'INVALID_RESPONSE' });
+            continue;
+          }
+          if (usable().length === 0) continue;
         }
-        if (candidates.length === 0) {
-          leaveSitemaps({ listing, code: 'INVALID_RESPONSE' });
-          lastError = new MediaProviderError(`${PROVIDER} ${listing} listed no usable image.`, { code: 'INVALID_RESPONSE' });
-          continue;
-        }
-        if (usable().length === 0) continue;
+        choice = { url: dependencies.choose(usable()), id: listing, fromCatalog: false };
       }
-      const url = dependencies.choose(usable());
-      attempted.add(url);
+      attempted.add(choice.url);
       downloads += 1;
       try {
-        const image = await downloadCosplayImage(context, HENTAI_COSPLAY_FEED, url);
-        return mediaResult({ provider: PROVIDER, id: listing, url: image.url, watchUrl: image.url, download: image.download });
+        const image = await downloadCosplayImage(context, HENTAI_COSPLAY_FEED, choice.url);
+        return mediaResult({ provider: PROVIDER, id: choice.id, url: image.url, watchUrl: image.url, download: image.download });
       } catch (error) {
         lastError = error;
         if (STOP_CODES.has(error?.code)) break;
-        if (hostIsFailing(error)) markDead(url, Date.now());
+        if (hostIsFailing(error)) markDead(choice.url, Date.now());
+        if (choice.fromCatalog && isMissing(error)) {
+          catalogMisses += 1;
+          if (catalogMisses >= CATALOG_MISSES) {
+            useCatalog = false;
+            context.logger?.warn('Cosplay catalog images are missing on the site; reading the sitemaps instead.', { provider: PROVIDER });
+          }
+        }
         context.logger?.debug('Rejected a cosplay image; trying another.', {
           provider: PROVIDER,
-          listing,
+          listing: choice.id,
           code: error?.code,
           reason: error?.message,
         });

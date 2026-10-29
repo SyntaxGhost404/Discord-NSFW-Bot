@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { fetchAbd } from '../src/brain/providers/abd.js';
 import { fetchAhottie } from '../src/brain/providers/ahottie.js';
+import { albumsFromSitemap, catalogText, createCosplayCatalog } from '../src/brain/providers/cosplay-catalog.js';
+import bundledCosplayCatalog from '../src/brain/providers/cosplay-catalog.txt';
 import { ahottieMaximumPage, extractAhottieMedia, extractHentaiCosplayMedia, hentaiCosplayMaximumPage } from '../src/brain/providers/cosplay-feed.js';
 import { fetchHentaiCosplayXxx, resetHentaiCosplayStateForTests } from '../src/brain/providers/hentai-cosplay-xxx.js';
 import { KNOWN_PLACEHOLDERS, MediaHttpClient, SubrequestBudget, imageDimensions, sniffImageType } from '../src/brain/providers/http.js';
@@ -11,6 +13,7 @@ import { extractPorngifsTvMedia, fetchPorngifsTv } from '../src/brain/providers/
 import { extractPornPicsCovers, fetchPornPics, highResolutionPornPicsCover, pornPicsItemCeiling, resetPornPicsStateForTests } from '../src/brain/providers/pornpics.js';
 import { fetchSexCom } from '../src/brain/providers/sexcom.js';
 import { fetchWaifuArchive } from '../src/brain/providers/waifu-archive.js';
+import { randomInteger } from '../src/lib/random.js';
 import { image, imageBytes, json } from './helpers/fetch-mock.js';
 
 function router(routes) {
@@ -39,6 +42,13 @@ function context(routes, { maxMediaBytes = 1_000_000, config = {}, http = {} } =
 async function sha256(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+// Returns the given values in order, for code that draws several random
+// numbers.
+function sequence(...values) {
+  let next = 0;
+  return () => values[next++ % values.length];
 }
 
 function hangingFetch() {
@@ -374,6 +384,76 @@ describe('scraped GIF providers', () => {
   });
 });
 
+describe('cosplay catalog', () => {
+  const upload = (host, path) => `https://${host}.hentai-cosplay-xxx.com/upload/${path}`;
+  // A sitemap with every image of each album, as the site serves it.
+  const albumSitemap = (albums) => `<?xml version="1.0"?><urlset>${albums.map((urls) => (
+    `<url><loc>https://hentai-cosplay-xxx.com/image/a/</loc>${urls.map((url) => (
+      `<image:image><image:loc>${url}</image:loc><image:title><![CDATA[t]]></image:title></image:image>`
+    )).join('')}</url>`
+  )).join('')}</urlset>`;
+  const xml = albumSitemap([
+    [1, 2, 3].map((n) => upload('static6', `20220124/285/291755/${n}.jpg`)),
+    [upload('static6', '20220125/285/291760/5.webp'), upload('static6', '20220125/285/291760/6.webp'), upload('static6', '20220125/285/291760/7.jpg')],
+    [upload('static6', '20220125/286/291761/2.jpeg'), 'https://evil.example/upload/20220125/286/291761/3.jpg', upload('static6', '20220125/286/291761/p=160x200/4.jpg')],
+    Array.from({ length: 30 }, (_, index) => upload('static17', `20261026/448/458355/${index + 1}.png`)),
+    // The sitemaps continue a large album in another entry.
+    Array.from({ length: 10 }, (_, index) => upload('static17', `20261026/448/458355/${index + 31}.png`)),
+  ]);
+
+  it('turns sitemap albums into catalog lines and back into the same image URLs', () => {
+    const albums = albumsFromSitemap(xml);
+    expect(albums.map((album) => album.runs)).toEqual([
+      [{ first: 1, count: 3, extension: 'jpg' }],
+      [{ first: 5, count: 2, extension: 'webp' }, { first: 7, count: 1, extension: 'jpg' }],
+      [{ first: 2, count: 1, extension: 'jpeg' }],
+      [{ first: 1, count: 40, extension: 'png' }],
+    ]);
+    const text = catalogText(albums, ['a comment']);
+    expect(text.split('\n').filter((line) => line.startsWith('static'))).toHaveLength(2);
+    const catalog = createCosplayCatalog(text);
+    expect(catalog.albums).toBe(4);
+    // Each pick draws a line, a position on it, then an image of that album.
+    expect(catalog.pick(sequence(0, 0, 0))).toEqual({ url: upload('static6', '20220124/285/291755/1.jpg'), album: 291755 });
+    expect(catalog.pick(sequence(0, 1, 1)).url).toBe(upload('static6', '20220125/285/291760/6.webp'));
+    expect(catalog.pick(sequence(0, 1, 2)).url).toBe(upload('static6', '20220125/285/291760/7.jpg'));
+    expect(catalog.pick(sequence(0, 2, 0)).url).toBe(upload('static6', '20220125/286/291761/2.jpeg'));
+    expect(catalog.pick(sequence(1, 0, 39))).toEqual({ url: upload('static17', '20261026/448/458355/40.png'), album: 458355 });
+    // A position past the end of a line is drawn again.
+    expect(catalog.pick(sequence(0, 5, 1, 0, 9)).url).toBe(upload('static17', '20261026/448/458355/10.png'));
+  });
+
+  it('keeps lines short, so a pick decodes at most 32 albums', () => {
+    const albums = Array.from({ length: 70 }, (_, index) => ({
+      host: 'static3', date: '20200101', group: 10, id: 1_000 + index, runs: [{ first: 1, count: 1, extension: 'jpg' }],
+    }));
+    const text = catalogText(albums);
+    expect(text.split('\n').filter((line) => line.startsWith('static3')).map((line) => line.split(' ').length - 1)).toEqual([32, 32, 6]);
+    const catalog = createCosplayCatalog(text);
+    expect(catalog.albums).toBe(70);
+    expect(catalog.pick(sequence(2, 5, 0))).toEqual({ url: 'https://static3.hentai-cosplay-xxx.com/upload/20200101/10/1069/1.jpg', album: 1_069 });
+  });
+
+  it('lets the caller turn picks down, and gives up after twenty draws', () => {
+    const catalog = createCosplayCatalog(catalogText(albumsFromSitemap(xml)));
+    const onlyStatic17 = (url) => url.includes('//static17.');
+    expect(catalog.pick(sequence(0, 0, 0, 1, 0, 5), onlyStatic17).url).toBe(upload('static17', '20261026/448/458355/6.png'));
+    expect(catalog.pick(() => 0, onlyStatic17)).toBeNull();
+    expect(createCosplayCatalog('').pick(() => 0)).toBeNull();
+    expect(createCosplayCatalog('# no index line\n').albums).toBe(0);
+    // Changed line endings would shift every offset, so such a file reads as empty.
+    expect(createCosplayCatalog(catalogText(albumsFromSitemap(xml)).replaceAll('\n', '\r\n')).albums).toBe(0);
+  });
+
+  it('ships a catalog of every album, each pick a valid image URL', () => {
+    const catalog = createCosplayCatalog(bundledCosplayCatalog);
+    expect(catalog.albums).toBeGreaterThan(300_000);
+    for (let index = 0; index < 200; index += 1) {
+      expect(catalog.pick(randomInteger).url).toMatch(/^https:\/\/static\d*\.hentai-cosplay-xxx\.com\/upload\/(?:200|201|202)\d[01]\d[0-3]\d\/\d+\/\d+\/\d+\.(?:jpg|jpeg|png|gif|webp)$/);
+    }
+  });
+});
+
 describe('cosplay feeds', () => {
   const feedPage = (page) => `
     <a class="last" href="/search/page/15608/">Last</a>
@@ -463,6 +543,62 @@ describe('cosplay feeds', () => {
     expect(ctx.calls.map((request) => new URL(request.url).pathname)).toEqual([
       '/sitemap_images_detail_42.xml.gz', '/search/', '/search/page/42/', '/upload/2026/1/42.webp',
     ]);
+  });
+
+  const catalogOf = (albums) => createCosplayCatalog(catalogText(albums));
+  const album = (host, id, count) => ({ host, date: '20240107', group: 364, id, runs: [{ first: 1, count, extension: 'jpg' }] });
+  const albumImage = (host, id, n) => `https://${host}.hentai-cosplay-xxx.com/upload/20240107/364/${id}/${n}.jpg`;
+
+  it('picks a random catalog album without reading any listing', async () => {
+    const photo = albumImage('static5', 372226, 27);
+    const ctx = context([[`GET ${photo}`, (request) => {
+      expect(request.headers.get('referer')).toBe('https://hentai-cosplay-xxx.com/');
+      return image('image/jpeg');
+    }]]);
+    const result = await fetchHentaiCosplayXxx({}, { ...ctx, cosplayCatalog: catalogOf([album('static5', 372226, 30)]) }, { randomInteger: sequence(0, 0, 26), choose: (items) => items[0] });
+    expect(result).toMatchObject({ id: 'album 372226', url: photo, contentType: 'image/jpeg' });
+    expect(ctx.calls.map((request) => request.url)).toEqual([photo]);
+  });
+
+  it('skips catalog albums on a server that just failed', async () => {
+    const catalog = catalogOf([album('static11', 1, 1), album('static5', 2, 1)]);
+    const ctx = context([
+      ['GET https://static11.hentai-cosplay-xxx.com/', () => new Response('error code: 502', { status: 502 })],
+      [`GET ${albumImage('static5', 2, 1)}`, () => image('image/jpeg')],
+    ]);
+    // Line 0 holds the album on the failing server; drawing it again is turned down.
+    const result = await fetchHentaiCosplayXxx({}, ctx, { catalog, randomInteger: sequence(0, 0, 0, 0, 0, 0, 1, 0, 0), choose: (items) => items[0] });
+    expect(result).toMatchObject({ id: 'album 2' });
+    expect(ctx.calls.map((request) => request.url)).toEqual([albumImage('static11', 1, 1), albumImage('static5', 2, 1)]);
+  });
+
+  it('says once when the bundled catalog cannot be read, then uses the sitemaps', async () => {
+    const photo = cover('static5', 9, 1);
+    const routes = [[`GET ${sitemapUrl(42)}`, () => new Response(sitemap([photo]))], [`GET ${photo}`, () => image('image/jpeg')]];
+    const warnings = [];
+    const logger = { warn: (message) => warnings.push(message), debug() {} };
+    for (let run = 0; run < 2; run += 1) {
+      const ctx = context(routes);
+      const result = await fetchHentaiCosplayXxx({}, { ...ctx, logger, cosplayCatalog: createCosplayCatalog('corrupt') }, { randomInteger: () => 42, choose: (items) => items[0] });
+      expect(result).toMatchObject({ id: 'sitemap 42' });
+    }
+    expect(warnings).toEqual(['The bundled cosplay catalog is empty or unreadable; reading the sitemaps instead.']);
+  });
+
+  it('reads the live sitemaps when catalog images are gone from the site', async () => {
+    const photo = cover('static5', 9, 1);
+    const ctx = context([
+      ['GET https://static5.hentai-cosplay-xxx.com/upload/20240107/', () => new Response('not found', { status: 404 })],
+      [`GET ${sitemapUrl(42)}`, () => new Response(sitemap([photo]))],
+      [`GET ${photo}`, () => image('image/jpeg')],
+    ]);
+    const warnings = [];
+    const logger = { warn: (message) => warnings.push(message), debug() {} };
+    const catalog = catalogOf([album('static5', 1, 1), album('static5', 2, 1)]);
+    const result = await fetchHentaiCosplayXxx({}, { ...ctx, logger }, { catalog, randomInteger: sequence(0, 0, 0, 0, 1, 0, 42), choose: (items) => items[0] });
+    expect(result).toMatchObject({ id: 'sitemap 42', url: photo });
+    expect(ctx.calls.map((request) => request.url)).toEqual([albumImage('static5', 1, 1), albumImage('static5', 2, 1), sitemapUrl(42), photo]);
+    expect(warnings).toEqual(['Cosplay catalog images are missing on the site; reading the sitemaps instead.']);
   });
 
   it('gives up after three images, or at once when the budget runs out', async () => {

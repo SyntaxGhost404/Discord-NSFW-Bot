@@ -55,9 +55,9 @@ interaction ID.
   tried to replace the loading message with a generic error. The log includes
   the error.
 - **Invocation outcome `exceededCpu`.** On the Workers Free plan an invocation
-  is stopped after 10 ms of CPU, background work included. The HTML-scraping
-  sources (`/cosplay`, `/buttplug` with the Real style, and Porngifs.tv in
-  `/gif`) use the most. A Paid plan removes the limit in practice; see
+  is stopped after 10 ms of CPU, background work included. The scraping
+  sources (`/buttplug` with the Real style, Porngifs.tv in `/gif`, and the
+  `/cosplay` fallbacks) use the most. A Paid plan removes the limit in practice; see
   [Free vs. Paid plans](../README.md#free-vs-paid-plans).
 - **"Discord interaction expired before the follow-up could be delivered."**
   The interaction token was no longer valid (Discord code `10015`, `10008`,
@@ -113,10 +113,10 @@ image is replaced with another one, up to three per provider. Set
 `LOG_LEVEL=debug` to see each rejection as "Rejected a cosplay image; trying
 another." with its `code`.
 
-- **Hentai-cosplay-xxx (primary).** Several of its image servers answer `502`
-  for every file. A server that fails is skipped for ten minutes by that
-  isolate, and each retry reads a new random sitemap, which almost always
-  lands on a working server.
+- **Hentai-cosplay-xxx (primary).** Several of its image servers have
+  answered `502` for every file. A server that fails is skipped for ten
+  minutes by that isolate, and the next image comes from an album on another
+  server.
 - **Ahottie (fallback, off by default).** Its images are hosted on imgbox. In
   October 2026 imgbox answered every request with the same "Thumbnail
   Temporarily Unavailable" picture, which is rejected as `PLACEHOLDER_IMAGE`.
@@ -125,16 +125,34 @@ another." with its `code`.
   attempts fail. Turn Ahottie back on only once imgbox serves real images
   again.
 
-`/cosplay` normally answers in about a second, because it reads the start of
-one of the site's edge-cached image sitemaps instead of a feed page. If it
-takes several seconds again, look for **"Cosplay sitemaps are unavailable;
-reading feed pages instead."** The sitemap could not be read (`code` and
-`status` say why) or no longer lists images in the expected format, so the
-request fell back to feed pages, which the site takes 0.5–4.5 seconds to
-build. The command still works, just more slowly. If the site has moved its
-sitemaps, check `robots.txt` and update `HENTAI_COSPLAY_SITEMAP` in
-`src/brain/providers/manifest.js` (and `SITEMAP_FILES` in
-`hentai-cosplay-xxx.js` if the number of files changed).
+`/cosplay` normally answers in about half a second, because it picks an
+album from its bundled catalog and downloads one image, with no listing to
+read. If it gets slower, the logs say which fallback ran:
+
+- **"Cosplay catalog images are missing on the site; reading the sitemaps
+  instead."** Two catalog images in one request were gone (`404`), so the
+  catalog is out of date or the site has changed its image addresses. The
+  request still works through the live sitemaps, which reach far fewer
+  albums. Rebuild the catalog with `npm run catalog:cosplay` and redeploy
+  (see [Refreshing the `/cosplay` catalog](../README.md#refreshing-the-cosplay-catalog)).
+  If a fresh catalog still misses, the site has changed its layout, and the
+  build script and `cosplay-catalog.js` need updating.
+- **"The bundled cosplay catalog is empty or unreadable; reading the
+  sitemaps instead."** Logged once per isolate. The catalog file is missing
+  its index or was altered after it was built (for example, by an editor
+  that changed its line endings), so `/cosplay` runs on the slower
+  fallbacks. Rebuild it with `npm run catalog:cosplay` and redeploy.
+- **"Cosplay sitemaps are unavailable; reading feed pages instead."** The
+  sitemap fallback could not be read (`code` and `status` say why) or no
+  longer lists images in the expected format, so the request used feed
+  pages, which the site takes 0.5–4.5 seconds to build. If the site has moved
+  its sitemaps, check `robots.txt` and update `HENTAI_COSPLAY_SITEMAP` in
+  `src/brain/providers/manifest.js` (and `SITEMAP_FILES` in
+  `hentai-cosplay-xxx.js` if the number of files changed).
+
+`npm run catalog:cosplay` refuses to replace the catalog if any sitemap fails
+to download, and says which ones; run it again (with `--cache`, files already
+read are reused for a day).
 
 If a host starts sending a new stand-in picture, add its byte size and SHA-256
 to `KNOWN_PLACEHOLDERS` in `src/brain/providers/http.js`:

@@ -157,6 +157,7 @@ export class InteractionRouter {
       cf: runtime.cf ?? null,
       commands: this.commands,
       circuitBreaker: runtime.circuitBreaker,
+      cosplayCatalog: runtime.cosplayCatalog,
       quota: runtime.quota,
       rest: runtime.rest,
       fetch: runtime.fetch,
