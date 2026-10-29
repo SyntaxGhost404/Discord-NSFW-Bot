@@ -207,7 +207,7 @@ export class InteractionWebhook {
         const early = this.now() - this.receivedAt < 5_000;
         const missing = error instanceof DiscordRestError && (error.code === 10015 || error.code === 10008 || error.status === 404);
         if (!(early && missing && attempt < 2)) throw error;
-        await sleep(750);
+        await sleep(attempt === 0 ? 250 : 750);
       }
     }
   }

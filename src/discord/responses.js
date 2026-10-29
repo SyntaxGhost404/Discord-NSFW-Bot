@@ -41,6 +41,16 @@ export function deferFor(source, task) {
   return source === 'component' ? deferredUpdate(task) : deferred(task);
 }
 
+// Work that ends in a finished message: `prepare` resolves to
+// { body, files = [], mediaDisplayed = false }. The router sends that message
+// as the initial response when it is ready quickly and needs no upload, and
+// otherwise acknowledges and edits the message in when it is ready. `prepare`
+// receives { willUpload }, to call as soon as it knows a file will be sent,
+// so the acknowledgement does not wait for the download.
+export function respondWhenReady(prepare) {
+  return { prepare };
+}
+
 export function errorEmbed(title, description) {
   return { title, description, color: 0xed4245 };
 }

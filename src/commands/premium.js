@@ -8,7 +8,7 @@ import { Emoji } from '../config/emojis.js';
 import { actionRow, button } from '../discord/components.js';
 import { ButtonStyle } from '../discord/constants.js';
 import { requester, resolvedUser } from '../discord/interaction-data.js';
-import { deferFor, ephemeral } from '../discord/responses.js';
+import { ephemeral, respondWhenReady } from '../discord/responses.js';
 import { avatarUrl, displayName } from '../lib/discord-user.js';
 import { randomColor } from '../lib/random.js';
 
@@ -156,32 +156,34 @@ export default {
     if (context.source === 'component') {
       const refresh = parseRefreshCustomId(state.customId);
       if (!refresh) return ephemeral({ content: 'This Premium refresh button is no longer valid.' });
-      return deferFor('component', async () => {
+      return respondWhenReady(async () => {
         const { target, footer } = componentProfile(context.interaction, refresh);
         const snapshot = await context.quota.snapshot(refresh.targetId);
-        await context.webhook.editOriginal(responseBody({
-          target,
-          viewerId: refresh.viewerId,
-          footer,
-          premium: context.quota.isPremium(refresh.targetId),
-          snapshot,
-        }));
-        return {};
+        return {
+          body: responseBody({
+            target,
+            viewerId: refresh.viewerId,
+            footer,
+            premium: context.quota.isPremium(refresh.targetId),
+            snapshot,
+          }),
+        };
       });
     }
 
-    return deferFor('command', async () => {
+    return respondWhenReady(async () => {
       const author = requester(context.interaction);
       const target = resolvedUser(context.interaction, 'user');
       const snapshot = await context.quota.snapshot(target.id);
-      await context.webhook.editOriginal(responseBody({
-        target,
-        viewerId: author.id,
-        footer: footerFor(target),
-        premium: context.quota.isPremium(target.id),
-        snapshot,
-      }));
-      return {};
+      return {
+        body: responseBody({
+          target,
+          viewerId: author.id,
+          footer: footerFor(target),
+          premium: context.quota.isPremium(target.id),
+          snapshot,
+        }),
+      };
     });
   },
 };

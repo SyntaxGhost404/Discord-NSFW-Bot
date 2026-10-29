@@ -1,10 +1,10 @@
-import { fetchMedia } from './providers/index.js';
+import { fetchMedia, providerEnabled } from './providers/index.js';
 import { MediaHttpClient, SubrequestBudget } from './providers/http.js';
 import { commandData } from './command-schema.js';
 import { actionRow, button } from '../discord/components.js';
 import { ButtonStyle } from '../discord/constants.js';
 import { mediaCustomId, optionValue, requester } from '../discord/interaction-data.js';
-import { deferFor, errorEmbed } from '../discord/responses.js';
+import { errorEmbed, respondWhenReady } from '../discord/responses.js';
 import { Emoji, uiText } from '../config/emojis.js';
 import { avatarUrl, displayName } from '../lib/discord-user.js';
 import { choose, randomColor, shuffle } from '../lib/random.js';
@@ -53,15 +53,19 @@ function errorDescription(errors) {
     return 'Every available media source timed out. Please try again shortly.';
   }
   if (errors.length > 0 && errors.every((error) => error?.code === 'PROVIDER_DISABLED')) {
-    return 'The required media provider is not configured. Check the provider secrets.';
+    return 'The media sources for this command are turned off or not configured.';
   }
   return 'No media source returned a usable result. Please try again.';
 }
 
 export async function resolveMedia(specification, context, state) {
-  const pool = sourcePool(specification, context.interaction, state);
+  const pool = sourcePool(specification, context.interaction, state)
+    .filter((source) => providerEnabled(source.provider, context.config));
   const sources = specification.orderedSources ? [...pool] : shuffle(pool);
   const errors = [];
+  if (sources.length === 0) {
+    errors.push(Object.assign(new Error('Every media source for this command is switched off.'), { code: 'PROVIDER_DISABLED' }));
+  }
   for (const source of sources) {
     if (context.http.remainingTime() < MINIMUM_ATTEMPT_MS) {
       errors.push(Object.assign(new Error('The media deadline left no time for another source.'), { code: 'DEADLINE_EXCEEDED' }));
@@ -83,8 +87,8 @@ export async function resolveMedia(specification, context, state) {
       }
     } catch (error) {
       errors.push(error);
-      // Waifu.pics is disabled by default, so skipping a disabled source is
-      // routine rather than a warning.
+      // A source without its secret (NekoBot without NEKOBOT_AUTHORIZATION)
+      // is skipped routinely, so that is not a warning.
       const level = error?.code === 'PROVIDER_DISABLED' ? 'debug' : 'warn';
       context.logger[level]('Media source failed; trying the next configured source.', {
         command: specification.name,
@@ -129,9 +133,10 @@ export function mediaMessage(specification, context, state, result) {
   return { body, files };
 }
 
-// Runs after the deferred acknowledgement: tries the command's providers in
-// order until one succeeds, then edits the loading message in place.
-export async function runMediaRequest(specification, context, state = {}) {
+// Tries the command's providers in order until one succeeds and builds the
+// finished message, or an error message when none does. `willUpload` is
+// called when a provider starts downloading a file to upload.
+export async function prepareMediaMessage(specification, context, state = {}, { willUpload } = {}) {
   const deadline = context.receivedAt + context.config.mediaDeadlineMs - DISCORD_UPLOAD_RESERVE_MS;
   const http = new MediaHttpClient({
     timeoutMs: context.config.mediaTimeoutMs,
@@ -139,21 +144,21 @@ export async function runMediaRequest(specification, context, state = {}) {
     deadline,
     budget: new SubrequestBudget(Math.max(1, context.config.maxSubrequests - DISCORD_SUBREQUEST_RESERVE)),
     fetchImpl: context.fetch,
+    onDownload: willUpload,
   });
   const { result, errors } = await resolveMedia(specification, { ...context, http }, state);
-
   if (!result) {
-    await context.webhook.editOriginal({
-      embeds: [errorEmbed(uiText(Emoji.ui.error, 'Error'), errorDescription(errors))],
-      components: [],
-      attachments: [],
-    });
-    return { mediaDisplayed: false };
+    return {
+      body: {
+        embeds: [errorEmbed(uiText(Emoji.ui.error, 'Error'), errorDescription(errors))],
+        components: [],
+        attachments: [],
+      },
+      files: [],
+      mediaDisplayed: false,
+    };
   }
-
-  const { body, files } = mediaMessage(specification, context, state, result);
-  await context.webhook.editOriginal(body, files);
-  return { mediaDisplayed: true };
+  return { ...mediaMessage(specification, context, state, result), mediaDisplayed: true };
 }
 
 export function defineMediaCommand(specification) {
@@ -169,7 +174,7 @@ export function defineMediaCommand(specification) {
     kind: 'media',
     media: specification,
     execute(context, state = {}) {
-      return deferFor(context.source, () => runMediaRequest(specification, context, state));
+      return respondWhenReady((hooks) => prepareMediaMessage(specification, context, state, hooks));
     },
   };
 }

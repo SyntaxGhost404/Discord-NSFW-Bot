@@ -36,6 +36,16 @@ const MEDIA_HEADERS = Object.freeze({
 
 const defaultDependencies = Object.freeze({ randomInteger });
 
+// The category's item count changes slowly. Once an isolate has read it,
+// later requests skip the 53 KB category page and read one offset directly;
+// offset 0 is the category page itself, so they start at 1.
+const CEILING_TTL_MS = 60 * 60 * 1_000;
+let itemCeiling = null;
+
+export function resetPornPicsStateForTests() {
+  itemCeiling = null;
+}
+
 function invalidResponse(message, cause) {
   return new MediaProviderError(message, {
     code: 'INVALID_RESPONSE',
@@ -236,26 +246,40 @@ async function downloadCover(url, context) {
   throw lastError;
 }
 
+async function discoverCover(category, context, dependencies) {
+  const discoveryHtml = await context.http.text(category.toString(), {
+    headers: HTML_HEADERS,
+    allowedHosts: [FEED_HOST],
+    maximumBytes: MAXIMUM_FEED_BYTES,
+  });
+  const itemCount = pornPicsItemCeiling(discoveryHtml);
+  itemCeiling = { value: itemCount, at: Date.now() };
+  const selectedOffset = dependencies.randomInteger(0, itemCount - 1);
+  if (!Number.isInteger(selectedOffset) || selectedOffset < 0 || selectedOffset >= itemCount) {
+    throw invalidResponse('PornPics random offset was outside the discovered item range.');
+  }
+  if (selectedOffset < Math.min(INITIAL_FEED_ITEMS, itemCount)) {
+    const covers = extractPornPicsCovers(discoveryHtml, category.toString());
+    if (covers[selectedOffset]) return { id: String(selectedOffset), url: covers[selectedOffset] };
+  }
+  return offsetCover(category, selectedOffset, context);
+}
+
 export async function fetchPornPics(source, context, dependencies = defaultDependencies) {
   try {
     const category = categoryUrl(source?.endpoint);
-    const discoveryHtml = await context.http.text(category.toString(), {
-      headers: HTML_HEADERS,
-      allowedHosts: [FEED_HOST],
-      maximumBytes: MAXIMUM_FEED_BYTES,
-    });
-    const itemCount = pornPicsItemCeiling(discoveryHtml);
-    const selectedOffset = dependencies.randomInteger(0, itemCount - 1);
-    if (!Number.isInteger(selectedOffset) || selectedOffset < 0 || selectedOffset >= itemCount) {
-      throw invalidResponse('PornPics random offset was outside the discovered item range.');
-    }
-
+    const known = itemCeiling && Date.now() - itemCeiling.at < CEILING_TTL_MS && itemCeiling.value > 1;
     let selected = null;
-    if (selectedOffset < Math.min(INITIAL_FEED_ITEMS, itemCount)) {
-      const covers = extractPornPicsCovers(discoveryHtml, category.toString());
-      if (covers[selectedOffset]) selected = { id: String(selectedOffset), url: covers[selectedOffset] };
+    if (known) {
+      try {
+        selected = await offsetCover(category, dependencies.randomInteger(1, itemCeiling.value - 1), context);
+      } catch (error) {
+        if (error?.code !== 'INVALID_RESPONSE') throw error;
+        // The category may have shrunk past the offset; count it again.
+        itemCeiling = null;
+      }
     }
-    selected ??= await offsetCover(category, selectedOffset, context);
+    selected ??= await discoverCover(category, context, dependencies);
 
     const download = await downloadCover(selected.url, context);
     const resolvedUrl = highResolutionPornPicsCover(download.finalUrl || selected.url);

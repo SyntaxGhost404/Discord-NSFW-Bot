@@ -9,17 +9,22 @@ own module under `src/commands/`; the adapters live in `src/brain/providers/`.
 Every provider request goes through `MediaHttpClient`
 (`src/brain/providers/http.js`):
 
-- **Time.** Each request has a timeout of `MEDIA_TIMEOUT_MS` (10 s by default).
-  The whole media request must finish within `MEDIA_DEADLINE_MS` (24 s) minus
-  4 s kept back for the Discord upload, inside the 30-second `waitUntil()`
-  window.
+- **Time.** Each request has a timeout of `MEDIA_TIMEOUT_MS` (10 s by default),
+  and a provider must start answering (send its response headers) within 4 s,
+  or 8 s for the cosplay feed pages, which the site builds slowly. A stalled
+  host therefore fails over after 4 s instead of 10, while a large download
+  that has started is not cut short. The whole media request must finish
+  within `MEDIA_DEADLINE_MS` (24 s) minus 4 s kept back for the Discord
+  upload, inside the 30-second `waitUntil()` window.
 - **Subrequests.** A media request may make `MAX_SUBREQUESTS` (45) outbound
   fetches minus two kept back for Discord. The Free plan allows 50 per
   invocation.
 - **Size.** Bodies are streamed with a running byte count: 1 MiB for JSON,
   2 MiB for HTML (3 MiB for the cosplay feeds, 512 KiB for PornPics offset
-  JSON). Downloads are capped at the smaller of `MAX_MEDIA_BYTES` and the
-  interaction's `attachment_size_limit`.
+  JSON). The cosplay sitemaps are read only up to their first 96 KiB,
+  unpacked on the way, and the rest of the transfer is cancelled. Downloads
+  are capped at the smaller of `MAX_MEDIA_BYTES` and the interaction's
+  `attachment_size_limit`.
 - **Hosts.** Where an adapter declares allowed hosts, they are checked before
   the request and again after redirects.
 - **Images.** A download that will be uploaded must start with JPEG, PNG, GIF,
@@ -30,9 +35,16 @@ Every provider request goes through `MediaHttpClient`
   and SHA-256) is rejected too, and an adapter can require a minimum pixel
   size, read from the image header without decoding it.
 - **Delivery.** URL results are put straight into the embed and Discord fetches
-  them. Downloaded results are uploaded with the edit as `media.<ext>` and
-  referenced as `attachment://media.<ext>`. The Link button always opens the
-  provider's URL.
+  them. When such a result is ready within about 1.5 seconds, it is the
+  interaction's initial response, so it appears without a loading state.
+  Downloaded results are uploaded with an edit as `media.<ext>` and
+  referenced as `attachment://media.<ext>`; their loading message is sent as
+  soon as the download starts. The Link button always opens the provider's
+  URL.
+- **Switched-off providers.** Waifu.pics (`WAIFU_PICS`) and Ahottie
+  (`AHOTTIE`) are off by default because they no longer work. Their sources
+  are dropped from a command's list before anything is requested, and each
+  can be turned back on by setting its variable to `"true"`.
 - **Credentials.** Only NekoBot receives a secret, and only in its own
   header. Media hosts never receive credentials, and the Discord bot
   token is never sent to a provider.
@@ -114,15 +126,21 @@ returns up to five random matches in the Waifu.im v7 shape:
 { "items": [{ "id": 337, "url": "https://waifu-im-shim.trinitymoin.workers.dev/337.jpeg", "is_nsfw": true }] }
 ```
 
-The adapter (`src/brain/providers/waifu-archive.js`) accepts only items whose
-`url` is HTTPS on the archive's own host with an `/{id}.{ext}` image path. It
-downloads the first such file from the archive and uploads it as an
-attachment. A file that is too large to upload (judged from its
-`Content-Length` before the body is read), not an image, or a known
-placeholder is skipped in favour of the next match. A timeout or `5xx` error
-stops at once, because the archive itself is struggling. The original bytes
-are uploaded unchanged, and the Link button opens the file on the archive.
-The archive ignores `Accept-Version` and `Authorization`, so neither is sent.
+The archive is frozen, so the bot ships an index of it
+(`src/brain/providers/waifu-archive-index.js`, generated from the export by
+`scripts/build-waifu-archive-index.mjs`): the 3,025 NSFW images under the 12
+tags the bot uses, with each file's size. The adapter
+(`src/brain/providers/waifu-archive.js`) picks a random indexed image that is
+small enough to upload and downloads it straight from
+`https://waifu-im-shim.trinitymoin.workers.dev/{id}.{ext}`, so no search
+request is needed. If that file is missing (`404`), too large, not an image,
+or a known placeholder, the adapter falls back to the search above. From the
+search it accepts only items whose `url` is HTTPS on the archive's own host
+with an `/{id}.{ext}` image path, and tries them in order on the same terms.
+A timeout or `5xx` error stops at once, because the archive itself is
+struggling. The original bytes are uploaded unchanged, and the Link button
+opens the file on the archive. The archive ignores `Accept-Version` and
+`Authorization`, so neither is sent.
 
 The file is uploaded rather than linked because of how Discord renders
 linked images. Discord fills in a linked image's size only if it can fetch
@@ -141,7 +159,8 @@ Tags used, with the number of NSFW images each has in the archive: `ass`
 
 `GET https://api.waifu.pics/nsfw/{category}`, embedded by URL from `url`.
 Disabled unless `WAIFU_PICS=true`, as in the original deployment; disabled
-sources are skipped without a request.
+sources are skipped without a request. In live tests in October 2026 every
+connection to `api.waifu.pics` failed.
 
 Categories used: `blowjob`, `neko`, and `waifu`.
 
@@ -223,16 +242,10 @@ as an attachment. Up to three pages are tried.
 ## Cosplay feeds
 
 `/cosplay` uses Hentai-cosplay-xxx. Ahottie is a fallback that is off unless
-`AHOTTIE=true`, because its images are currently dead (see below). Both read
-the feed's page count, pick a random page, choose one image on it, download
-it, and upload it as an attachment. Gallery and album pages are never
-opened.
-
-For Hentai-cosplay-xxx, the links usually come ready-made from the
-`CosplayPool` Durable Object (see [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md#cosplay-link-pool)),
-so no feed page is read while the user waits. In a live test this took the
-provider from a median of 5.2 seconds to 0.24 seconds. When the pool is empty
-or unreachable, the provider reads a feed page itself, as described below.
+`AHOTTIE=true`, because its images are currently dead (see below). Each finds
+a random image in a listing, downloads it, and uploads it as an attachment.
+Gallery and album pages are never opened, and nothing is read before a user
+asks.
 
 Many album covers on both feeds are dead, so every download is checked before
 it is used. It must be a JPEG, PNG, GIF, or WebP of at least 1 KiB, at least
@@ -243,26 +256,43 @@ does the command move on. The rejections are logged at `debug` level as
 
 ### Hentai-cosplay-xxx.com
 
-Feed: `https://hentai-cosplay-xxx.com/search/page/{page}/`, with page 1
-requested at its final address, `https://hentai-cosplay-xxx.com/search/`
-(the numbered address redirects there, and every redirect hop counts as a
-subrequest).
+The site lists every image in gzip-compressed image sitemaps
+(`robots.txt` → `sitemap_index_images_detail.xml` →
+`https://hentai-cosplay-xxx.com/sitemap_images_detail_{file}.xml.gz`, files
+1 to 708). Each file covers 500 albums in upload order, and the files are
+cached at Cloudflare's edge, so one answers in about 0.2–0.6 seconds. A feed
+page, built on demand, takes 0.5–4.5 seconds.
 
-The page count comes from the `a.last` pagination link, falling back to the
-highest page link. Images are taken only from `ul#image-list`, preferring
-`data-original`/`data-full`, then the largest `srcset` entry, then lazy and
-plain `src` attributes. `/p={width}/` and `/p={width}x{height}/` resize
-segments are removed. Only HTTPS images on `hentai-cosplay-xxx.com` and its
-subdomains are accepted. The download sends
-`Referer: https://hentai-cosplay-xxx.com/`, because the image CDN refuses
-hotlinks without it.
+1. Pick a random file from 1 to 708 and read only its first 96 KiB of XML
+   (a few KB of gzip), then cancel the transfer. That holds a few hundred
+   images from the file's first albums and keeps parsing to about 2 ms of
+   CPU. Because the files run in upload order, every period of the site is
+   sampled.
+2. Take the `<image:loc>` URLs, remove `/p={width}/` and
+   `/p={width}x{height}/` resize segments, and keep only HTTPS images on
+   `hentai-cosplay-xxx.com` and its subdomains.
+3. Download one at random with `Referer: https://hentai-cosplay-xxx.com/`,
+   because the image CDN refuses hotlinks without it, and check it as below.
 
-Each page's covers usually sit on one image server (`static`, `static2`, …,
+If no sitemap can be read, or one lists no usable image, the provider reads
+feed pages instead and logs "Cosplay sitemaps are unavailable; reading feed
+pages instead." The feed is `https://hentai-cosplay-xxx.com/search/page/{page}/`,
+with page 1 requested at its final address,
+`https://hentai-cosplay-xxx.com/search/` (the numbered address redirects
+there, and every redirect hop counts as a subrequest). The page count comes
+from the `a.last` pagination link, falling back to the highest page link,
+and is remembered for an hour. Images are taken only from `ul#image-list`,
+preferring `data-original`/`data-full`, then the largest `srcset` entry, then
+lazy and plain `src` attributes.
+
+A listing's images usually sit on one image server (`static`, `static2`, …,
 `static17`), and in October 2026 four of them (`static10`, `static11`,
-`static13`, and `static15`) answered `502` for all or nearly all files, about
-a quarter of all covers. A retry therefore reads a new random page instead of trying
-another cover on the same one. In a live test, 15 of 15 requests delivered a
-real photo, 6 of them after a retry.
+`static13`, and `static15`) answered `502` for all or nearly all files. When
+a download fails that way, the server is skipped for ten minutes, and a retry
+reads a new random listing instead of another image from the same server.
+In a live test on 29 October 2026, 10 of 10 requests delivered a photo, with
+a median of 0.94 seconds and a 90th percentile of 1.9 seconds, each from one
+sitemap read and one image download.
 
 ### Ahottie.top
 
@@ -296,6 +326,14 @@ Without a style, both are tried in random order.
    missing cover, use one request to
    `https://www.pornpics.com/butt-plug/?offset={offset}` and take `t_url_460`,
    or else `t_url`, from the first JSON item.
+
+   The gallery count changes slowly, so an isolate remembers it for an hour.
+   Until then, later requests skip step 1 and the 53 KB page, and read one
+   random offset from `1` to `P_MAX * 10 - 1` directly (a 9 KB response);
+   offset `0` is the category page itself. If that offset no longer holds a
+   gallery, the count is read again in the same request. A cached request
+   took about 0.1 seconds in a live test, against about 1 second with the
+   page.
 3. Accept only HTTPS covers on exactly `cdni.pornpics.com`, rewrite the
    `/300/` or `/460/` size segment to `/1280/`, and download that with
    `Referer: https://www.pornpics.com/butt-plug/`. A `NETWORK_ERROR` is retried
@@ -309,7 +347,8 @@ used.
 ## Commands and their sources
 
 Sources are tried in random order until one works, except `/cosplay`, which
-keeps its order. When a style command (`style: Anime`/`Real`) is used without
+keeps its order. Sources marked *(off)* are switched off by default and
+skipped without a request. When a style command (`style: Anime`/`Real`) is used without
 the option, the sources of both styles are combined. `/solo` and `/threesome`
 without an option pick one group at random, including a Nekos API group that
 is only reachable that way.
@@ -321,7 +360,7 @@ is only reachable that way.
 | `/anal` | `style: Real` | NekoBot `anal` |
 | `/ass` | `style: Anime` | N-SFW `ass`, Waifu archive `ass`, NekoBot `hass` |
 | `/ass` | `style: Real` | Obutts, NekoBot `ass` |
-| `/blowjob` | `style: Anime` | Purrbot `blowjob/gif`, Waifu.pics `blowjob`, N-SFW `blowjob`, Waifu archive `oral` |
+| `/blowjob` | `style: Anime` | Purrbot `blowjob/gif`, Waifu.pics `blowjob` *(off)*, N-SFW `blowjob`, Waifu archive `oral` |
 | `/blowjob` | `style: Real` | NekoBot `blowjob` |
 | `/boobs` | `style: Anime` | Waifu archive `oppai`, NekoBot `hboobs` |
 | `/boobs` | `style: Real` | Oboobs, NekoBot `boobs` |
@@ -329,7 +368,7 @@ is only reachable that way.
 | `/buttplug` | `style: Anime` | N-SFW `buttplug` |
 | `/buttplug` | `style: Real` | PornPics |
 | `/cages` | | N-SFW `cages` |
-| `/cosplay` | | Hentai-cosplay-xxx, then Ahottie (off unless `AHOTTIE=true`) |
+| `/cosplay` | | Hentai-cosplay-xxx, then Ahottie *(off)* |
 | `/cum` | | Purrbot `cum/gif` |
 | `/ecchi` | | N-SFW `ecchi`, Waifu archive `ecchi` |
 | `/ero` | | Waifu archive `ero` |
@@ -344,7 +383,7 @@ is only reachable that way.
 | `/maid` | | Waifu archive `maid`, Nekos API `maid` |
 | `/midriff` | | NekoBot `hmidriff` |
 | `/milf` | | N-SFW `milf`, Waifu archive `milf` |
-| `/neko` | | Purrbot `neko/gif`, Purrbot `neko/img`, Waifu.pics `neko`, N-SFW `neko`, Nekos API `catgirl`, NekoBot `lewdneko` |
+| `/neko` | | Purrbot `neko/gif`, Purrbot `neko/img`, Waifu.pics `neko` *(off)*, N-SFW `neko`, Nekos API `catgirl`, NekoBot `lewdneko` |
 | `/paizuri` | | N-SFW `paizuri`, Waifu archive `paizuri`, NekoBot `paizuri` |
 | `/petgirls` | | N-SFW `petgirls` |
 | `/pussy` | | Nekos API `pussy`, NekoBot `pussy` |
@@ -363,7 +402,7 @@ is only reachable that way.
 | `/threesome` | `type: mmf` | Purrbot `threesome_mmf/gif` |
 | `/threesome` | none (random group) | Nekos API `threesome` |
 | `/uniform` | | Waifu archive `uniform` |
-| `/waifu` | | Waifu.pics `waifu`, Waifu archive `waifu` |
+| `/waifu` | | Waifu.pics `waifu` *(off)*, Waifu archive `waifu` |
 | `/yuri` | | Purrbot `yuri/gif`, N-SFW `yuri`, NekoBot `hyuri`, Nekos API `yuri` |
 
 `test/commands.test.js` asserts this exact mapping, and

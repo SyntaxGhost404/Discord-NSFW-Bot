@@ -1,11 +1,19 @@
 import { InteractionResponseType, InteractionType } from '../discord/constants.js';
 import { commandNameForInteraction, parseMediaCustomId, requester } from '../discord/interaction-data.js';
-import { autocompleteResult, ephemeral, errorEmbed, reply } from '../discord/responses.js';
+import { autocompleteResult, deferFor, ephemeral, errorEmbed, reply, updateMessage } from '../discord/responses.js';
 import { InteractionWebhook, isInteractionUnavailableError } from '../discord/rest.js';
 import { isNsfwContext, nsfwErrorPayload } from './nsfw-guard.js';
 import { cooldownPayload } from './rate-limit/cooldown-payload.js';
 import { Emoji, uiText } from '../config/emojis.js';
 import { snowflakeTimestamp } from '../lib/snowflake.js';
+import { withTimeout } from '../lib/time.js';
+
+// Discord needs the initial response within three seconds of creating the
+// interaction. A prepared message that is ready within this window, counted
+// from both arrival and creation, is sent as that response; anything slower
+// is acknowledged first and edited in.
+const INLINE_WAIT_MS = 1_500;
+const INLINE_WINDOW_MS = 2_400;
 
 function legacyRefreshTarget(customId, commands) {
   const parts = customId.slice('refresh_'.length).split('_');
@@ -103,6 +111,11 @@ export class InteractionRouter {
       }
 
       const descriptor = await command.execute(context, state);
+      if (typeof descriptor.prepare === 'function') {
+        const heldReservation = reservation;
+        reservation = null;
+        return await this.#respondWhenReady(descriptor.prepare, context, { command: commandName, source, reservation: heldReservation });
+      }
       const { task, ...response } = descriptor;
       if (typeof task !== 'function') {
         if (reservation) await runtime.quota.rollback(reservation);
@@ -157,6 +170,53 @@ export class InteractionRouter {
         receivedAt: runtime.receivedAt,
       }),
     };
+  }
+
+  // Starts the work at once. A message that is ready inside the inline window
+  // and has no file to upload becomes the initial response, which saves the
+  // loading state and a follow-up edit. Otherwise Discord is acknowledged and
+  // the same, still-running work is edited in when it finishes. Uploads always
+  // take that path, because sending a file inside the window is not
+  // guaranteed to finish in time, and they are acknowledged as soon as their
+  // download starts, so Discord has the loading message ready for the edit.
+  async #respondWhenReady(prepare, context, meta) {
+    let willUpload;
+    const uploading = new Promise((resolve) => {
+      willUpload = () => resolve(null);
+    });
+    const work = Promise.resolve().then(() => prepare({ willUpload }));
+    work.catch(() => {});
+    const remaining = this.#inlineDeadline(context) - this.now();
+    const ready = remaining > 0
+      ? await withTimeout(Promise.race([work.then((value) => value, () => null), uploading]), remaining, null)
+      : null;
+    if (ready && (ready.files ?? []).length === 0) {
+      const response = meta.source === 'component' ? updateMessage(ready.body) : reply(ready.body);
+      if (!meta.reservation) return { response };
+      return { response, task: this.#settleReservation(context, meta.reservation, Boolean(ready.mediaDisplayed)) };
+    }
+    const deliver = async () => {
+      const prepared = await work;
+      await context.webhook.editOriginal(prepared.body, prepared.files ?? []);
+      return { mediaDisplayed: Boolean(prepared.mediaDisplayed) };
+    };
+    const { task: _deliver, ...response } = deferFor(meta.source, deliver);
+    return { response, task: this.#runTask(deliver, context, meta) };
+  }
+
+  #inlineDeadline(context) {
+    let deadline = context.receivedAt + INLINE_WAIT_MS;
+    try {
+      deadline = Math.min(deadline, snowflakeTimestamp(context.interaction.id) + INLINE_WINDOW_MS);
+    } catch {
+      // Without a creation time, the arrival time alone sets the window.
+    }
+    return deadline;
+  }
+
+  async #settleReservation(context, reservation, mediaDisplayed) {
+    if (mediaDisplayed) await context.quota.commit(reservation);
+    else await context.quota.rollback(reservation);
   }
 
   // Wraps a deferred task so it can never reject inside waitUntil: failures

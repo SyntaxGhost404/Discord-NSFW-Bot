@@ -18,6 +18,7 @@ export const ProviderEndpoint = Object.freeze({
   PORNGIFS_MEDIA: 'https://cdn.porngifs.com/img/{id}',
   PORNGIFS_TV: 'https://porngifs.tv/?action=ajax&mode=async&function=get_block&block_id=list_videos_most_recent_videos&sort_by=post_date&from={page}',
   PORNPICS_BUTTPLUG_FEED: 'https://www.pornpics.com/butt-plug/',
+  HENTAI_COSPLAY_SITEMAP: 'https://hentai-cosplay-xxx.com/sitemap_images_detail_{file}.xml.gz',
   HENTAI_COSPLAY_FIRST_PAGE: 'https://hentai-cosplay-xxx.com/search/',
   HENTAI_COSPLAY_FEED: 'https://hentai-cosplay-xxx.com/search/page/{page}/',
   AHOTTIE_COSPLAY_FEED: 'https://ahottie.top/tags/Cosplay?page={page}',

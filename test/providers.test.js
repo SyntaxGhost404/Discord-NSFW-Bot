@@ -1,14 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { fetchAbd } from '../src/brain/providers/abd.js';
 import { fetchAhottie } from '../src/brain/providers/ahottie.js';
 import { ahottieMaximumPage, extractAhottieMedia, extractHentaiCosplayMedia, hentaiCosplayMaximumPage } from '../src/brain/providers/cosplay-feed.js';
-import { fetchHentaiCosplayXxx } from '../src/brain/providers/hentai-cosplay-xxx.js';
+import { fetchHentaiCosplayXxx, resetHentaiCosplayStateForTests } from '../src/brain/providers/hentai-cosplay-xxx.js';
 import { KNOWN_PLACEHOLDERS, MediaHttpClient, SubrequestBudget, imageDimensions, sniffImageType } from '../src/brain/providers/http.js';
 import { fetchNekoBot } from '../src/brain/providers/nekobot.js';
 import { fetchOBoobs } from '../src/brain/providers/obru.js';
 import { fetchPorngifs } from '../src/brain/providers/porngifs.js';
 import { extractPorngifsTvMedia, fetchPorngifsTv } from '../src/brain/providers/porngifs-tv.js';
-import { extractPornPicsCovers, highResolutionPornPicsCover, pornPicsItemCeiling } from '../src/brain/providers/pornpics.js';
+import { extractPornPicsCovers, fetchPornPics, highResolutionPornPicsCover, pornPicsItemCeiling, resetPornPicsStateForTests } from '../src/brain/providers/pornpics.js';
 import { fetchSexCom } from '../src/brain/providers/sexcom.js';
 import { fetchWaifuArchive } from '../src/brain/providers/waifu-archive.js';
 import { image, imageBytes, json } from './helpers/fetch-mock.js';
@@ -71,6 +71,52 @@ describe('MediaHttpClient', () => {
 
     const expired = new MediaHttpClient({ timeoutMs: 5_000, maximumBytes: 100, deadline: Date.now() - 1, fetchImpl: hangingFetch() });
     await expect(expired.json('https://a.example/')).rejects.toMatchObject({ code: 'DEADLINE_EXCEEDED' });
+  });
+
+  it('fails over quickly when a provider never starts responding, without cutting a slow body short', async () => {
+    const silent = new MediaHttpClient({ timeoutMs: 5_000, headersTimeoutMs: 30, maximumBytes: 100, fetchImpl: hangingFetch() });
+    await expect(silent.json('https://a.example/')).rejects.toMatchObject({
+      code: 'TIMEOUT',
+      message: 'Provider did not start responding within 30 ms.',
+    });
+
+    // Headers arrive at once; the body takes longer than the first-byte timeout.
+    const encoder = new TextEncoder();
+    const slowBody = new MediaHttpClient({
+      timeoutMs: 5_000,
+      headersTimeoutMs: 30,
+      maximumBytes: 100,
+      fetchImpl: async () => new Response(new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode('{"ok":'));
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          controller.enqueue(encoder.encode('true}'));
+          controller.close();
+        },
+      })),
+    });
+    await expect(slowBody.json('https://a.example/')).resolves.toEqual({ ok: true });
+  });
+
+  it('reads only the start of a text file, unpacking gzip on the way', async () => {
+    const text = 'a'.repeat(50_000) + 'b'.repeat(50_000);
+    const packed = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    let cancelled = false;
+    const ctx = context([
+      ['GET https://a.example/plain', () => new Response(text)],
+      // Never closes: only cancelling ends the transfer.
+      ['GET https://a.example/packed', () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(packed);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }))],
+    ]);
+    expect(await ctx.http.textPrefix('https://a.example/plain', { length: 10 })).toBe('a'.repeat(10));
+    expect(await ctx.http.textPrefix('https://a.example/packed', { length: 60_000 })).toBe('a'.repeat(50_000) + 'b'.repeat(10_000));
+    expect(cancelled).toBe(true);
   });
 
   it('stops at the subrequest budget', async () => {
@@ -224,9 +270,24 @@ describe('JSON API providers', () => {
     await expect(fetchNekoBot({ type: 'hthigh' }, disabled)).rejects.toMatchObject({ code: 'PROVIDER_DISABLED' });
   });
 
-  it('uploads the Waifu archive original, moving past files too large to upload', async () => {
+  it('uploads an indexed Waifu archive original without a search request', async () => {
     const archive = 'https://waifu-im-shim.trinitymoin.workers.dev';
+    const offered = [];
+    const ctx = context([[`GET ${archive}/`, () => image('image/jpeg', 4_096)]], { maxMediaBytes: 2 * 1024 * 1024 });
+    const result = await fetchWaifuArchive({ tag: 'uniform', isNsfw: true }, ctx, {
+      choose: (items) => { offered.push(...items); return items[0]; },
+    });
+    expect(offered.length).toBeGreaterThan(200);
+    expect(offered.every((entry) => entry.bytes <= 2 * 1024 * 1024)).toBe(true);
+    expect(result).toMatchObject({ provider: 'waifu archive', id: offered[0].id, url: `${archive}/${offered[0].file}`, contentType: 'image/jpeg' });
+    expect(ctx.calls).toHaveLength(1);
+  });
+
+  it('falls back to the archive search when an indexed file is missing', async () => {
+    const archive = 'https://waifu-im-shim.trinitymoin.workers.dev';
+    const missing = { choose: () => ({ file: '99999.jpeg', id: '99999', bytes: 1_024 }) };
     const ctx = context([
+      [`GET ${archive}/99999.jpeg`, () => new Response('not found', { status: 404 })],
       [`GET ${archive}/images?IncludedTags=maid&IsNsfw=True`, (request) => {
         expect(request.headers.get('authorization')).toBeNull();
         expect(request.headers.get('accept-version')).toBeNull();
@@ -239,22 +300,21 @@ describe('JSON API providers', () => {
       [`GET ${archive}/8610.png`, () => new Response('x', { headers: { 'Content-Length': '15154809' } })],
       [`GET ${archive}/2949.png`, () => image('image/png', 4_096)],
     ]);
-    expect(await fetchWaifuArchive({ tag: 'maid', isNsfw: true }, ctx)).toMatchObject({
+    expect(await fetchWaifuArchive({ tag: 'maid', isNsfw: true }, ctx, missing)).toMatchObject({
       provider: 'waifu archive', id: '2949', url: `${archive}/2949.png`, watchUrl: `${archive}/2949.png`, contentType: 'image/png', fileName: 'media.png',
     });
-    expect(ctx.calls.map((request) => new URL(request.url).pathname)).toEqual(['/images', '/8610.png', '/2949.png']);
-
-    const struggling = context([
-      [`GET ${archive}/images?`, () => json({ items: [{ id: 1, url: `${archive}/1.png` }, { id: 2, url: `${archive}/2.png` }] })],
-      [`GET ${archive}/1.png`, () => new Response('busy', { status: 503 })],
-    ]);
-    await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, struggling)).rejects.toMatchObject({ code: 'HTTP_ERROR', status: 503, provider: 'waifu archive' });
-    expect(struggling.calls).toHaveLength(2);
+    expect(ctx.calls.map((request) => new URL(request.url).pathname)).toEqual(['/99999.jpeg', '/images', '/8610.png', '/2949.png']);
 
     for (const items of [[], [{ id: 1, url: 'http://waifu-im-shim.trinitymoin.workers.dev/1.png' }], [{ id: 1, url: `${archive}/notes.txt` }]]) {
-      const empty = context([[`GET ${archive}/images?`, () => json({ items })]]);
-      await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, empty)).rejects.toMatchObject({ code: 'INVALID_RESPONSE', provider: 'waifu archive' });
+      const empty = context([[`GET ${archive}/99999.jpeg`, () => new Response('', { status: 404 })], [`GET ${archive}/images?`, () => json({ items })]]);
+      await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, empty, missing)).rejects.toMatchObject({ code: 'INVALID_RESPONSE', provider: 'waifu archive' });
     }
+  });
+
+  it('stops at once when the Waifu archive itself is struggling', async () => {
+    const struggling = context([['GET https://waifu-im-shim.trinitymoin.workers.dev/', () => new Response('busy', { status: 503 })]]);
+    await expect(fetchWaifuArchive({ tag: 'maid', isNsfw: true }, struggling)).rejects.toMatchObject({ code: 'HTTP_ERROR', status: 503, provider: 'waifu archive' });
+    expect(struggling.calls).toHaveLength(1);
   });
 
   it('converts Sex.com WebP URIs to GIFs on the CDN and links the pin', async () => {
@@ -328,82 +388,98 @@ describe('cosplay feeds', () => {
       .toEqual(['https://static1.hentai-cosplay-xxx.com/upload/2026/1/3.webp']);
   });
 
-  // Feed pages first, then the first page at its final /search/ address.
-  const hentaiFeedRoutes = [
-    ['GET https://hentai-cosplay-xxx.com/search/page/', (request) => new Response(feedPage(request.url.match(/page\/(\d+)/)[1]))],
-    ['GET https://hentai-cosplay-xxx.com/search/', () => new Response(feedPage(1))],
-  ];
+  const cover = (host, album, file) => `https://${host}.hentai-cosplay-xxx.com/upload/2026/1/${album}/${file}.jpg`;
+  // An image sitemap: every image of each album, as the site serves it.
+  const sitemap = (urls) => `<?xml version="1.0"?><urlset>${urls.map((url) => (
+    `<url><loc>https://hentai-cosplay-xxx.com/image/a/</loc><image:image><image:loc>${url}</image:loc></image:image></url>`
+  )).join('')}</urlset>`;
+  async function gzip(text) {
+    return new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+  }
+  const sitemapUrl = (file) => `https://hentai-cosplay-xxx.com/sitemap_images_detail_${file}.xml.gz`;
+  const nextFiles = (first) => {
+    let file = first;
+    return { randomInteger: () => file++, choose: (items) => items[0] };
+  };
 
-  it('sends a same-site Referer when downloading from the primary CDN', async () => {
+  beforeEach(() => resetHentaiCosplayStateForTests());
+
+  it('picks an image from a gzipped image sitemap and sends a same-site Referer', async () => {
+    const photo = cover('static17', 457942, 5);
     const ctx = context([
-      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', (request) => {
+      [`GET ${sitemapUrl(42)}`, async () => new Response(await gzip(sitemap([photo, cover('evil', 1, 1).replace('hentai-cosplay-xxx.com', 'evil.example')])), {
+        headers: { 'Content-Type': 'text/plain' },
+      })],
+      [`GET ${photo}`, (request) => {
         expect(request.headers.get('referer')).toBe('https://hentai-cosplay-xxx.com/');
-        return image('image/webp');
+        return image('image/jpeg');
       }],
-      ...hentaiFeedRoutes,
     ]);
     const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 42, choose: (items) => items[0] });
-    expect(result).toMatchObject({ id: '42', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', fileName: 'media.webp' });
-    expect(ctx.calls.map((request) => request.url)).toEqual([
-      'https://hentai-cosplay-xxx.com/search/',
-      'https://hentai-cosplay-xxx.com/search/page/42/',
-      'https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp',
-    ]);
+    expect(result).toMatchObject({ id: 'sitemap 42', url: photo, contentType: 'image/jpeg', fileName: 'media.jpg' });
+    expect(ctx.calls.map((request) => request.url)).toEqual([sitemapUrl(42), photo]);
   });
 
-  it('moves to a fresh feed page when a cover is dead', async () => {
+  it('reads only the start of a sitemap', async () => {
+    const early = cover('static5', 1, 1);
+    const late = cover('static5', 2, 1);
     const ctx = context([
-      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', () => new Response('error code: 502', { status: 502 })],
-      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/43.webp', () => new Response(new Uint8Array(0))],
-      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/44.webp', () => image('image/webp', 4_096, { width: 1_280, height: 1_920 })],
-      ...hentaiFeedRoutes,
+      [`GET ${sitemapUrl(3)}`, () => new Response(sitemap([early]) + ' '.repeat(200_000) + sitemap([late]))],
+      [`GET ${early}`, () => image('image/jpeg')],
     ]);
-    const pages = [42, 43, 44];
-    const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => pages.shift(), choose: (items) => items[0] });
-    expect(result).toMatchObject({ id: '44', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/44.webp' });
-    expect(ctx.calls).toHaveLength(7);
+    const chosen = [];
+    await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 3, choose: (items) => { chosen.push(...items); return items[0]; } });
+    expect(chosen).toEqual([early]);
   });
 
-  it('serves links from the cosplay pool without reading a feed page', async () => {
-    const cover = (id) => `https://static1.hentai-cosplay-xxx.com/upload/2026/1/${id}.webp`;
-    const ready = [{ url: cover(7), page: 7 }, { url: cover(8), page: 8 }];
-    const reported = [];
-    const pool = { take: async () => ready.shift() ?? null, reportDeadHost: async (url) => { reported.push(url); } };
+  it('moves to another sitemap when an image server is down, and skips that server afterwards', async () => {
+    const dead = [cover('static11', 300, 1), cover('static11', 300, 2)];
+    const alive = cover('static5', 200, 1);
+    const routes = [
+      [`GET ${sitemapUrl(7)}`, () => new Response(sitemap(dead))],
+      [`GET ${sitemapUrl(8)}`, () => new Response(sitemap([dead[1]]))],
+      [`GET ${sitemapUrl(9)}`, () => new Response(sitemap([alive]))],
+      ['GET https://static11.hentai-cosplay-xxx.com/', () => new Response('error code: 502', { status: 502 })],
+      [`GET ${alive}`, () => image('image/jpeg')],
+    ];
+    const first = context(routes);
+    expect(await fetchHentaiCosplayXxx({}, first, nextFiles(7))).toMatchObject({ id: 'sitemap 9', url: alive });
+    expect(first.calls.map((request) => request.url)).toEqual([sitemapUrl(7), dead[0], sitemapUrl(8), sitemapUrl(9), alive]);
+
+    const second = context(routes);
+    expect(await fetchHentaiCosplayXxx({}, second, nextFiles(8))).toMatchObject({ url: alive });
+    expect(second.calls.map((request) => request.url)).toEqual([sitemapUrl(8), sitemapUrl(9), alive]);
+  });
+
+  it('falls back to feed pages when the sitemaps are unavailable', async () => {
     const ctx = context([
-      [`GET ${cover(7)}`, () => new Response('error code: 502', { status: 502 })],
-      [`GET ${cover(8)}`, () => image('image/webp')],
+      ['GET https://hentai-cosplay-xxx.com/sitemap_images_detail_', () => new Response('not found', { status: 404 })],
+      ['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', () => image('image/webp')],
+      ['GET https://hentai-cosplay-xxx.com/search/page/', (request) => new Response(feedPage(request.url.match(/page\/(\d+)/)[1]))],
+      ['GET https://hentai-cosplay-xxx.com/search/', () => new Response(feedPage(1))],
     ]);
-    ctx.env = { COSPLAY_POOL: { getByName: (name) => (name === 'hentai-cosplay-xxx.com' ? pool : null) } };
-    expect(await fetchHentaiCosplayXxx({}, ctx)).toMatchObject({ id: '8', url: cover(8), contentType: 'image/webp' });
-    expect(reported).toEqual([cover(7)]);
-    expect(ctx.calls.map((request) => request.url)).toEqual([cover(7), cover(8)]);
+    const result = await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 42, choose: (items) => items[0] });
+    expect(result).toMatchObject({ id: 'feed page 42', url: 'https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp' });
+    expect(ctx.calls.map((request) => new URL(request.url).pathname)).toEqual([
+      '/sitemap_images_detail_42.xml.gz', '/search/', '/search/page/42/', '/upload/2026/1/42.webp',
+    ]);
   });
 
-  it('reads the feed directly when the pool is empty or failing', async () => {
-    for (const pool of [
-      { take: async () => null, reportDeadHost: async () => null },
-      { take: async () => { throw new Error('pool unavailable'); }, reportDeadHost: async () => null },
-    ]) {
-      const ctx = context([['GET https://static1.hentai-cosplay-xxx.com/upload/2026/1/42.webp', () => image('image/webp')], ...hentaiFeedRoutes]);
-      ctx.env = { COSPLAY_POOL: { getByName: () => pool } };
-      expect(await fetchHentaiCosplayXxx({}, ctx, { randomInteger: () => 42, choose: (items) => items[0] })).toMatchObject({ id: '42' });
-      expect(ctx.calls).toHaveLength(3);
-    }
-  });
+  it('gives up after three images, or at once when the budget runs out', async () => {
+    const routes = [
+      ['GET https://hentai-cosplay-xxx.com/sitemap_images_detail_', (request) => {
+        const file = request.url.match(/detail_(\d+)/)[1];
+        return new Response(sitemap([cover(`static${file}`, file, 1)]));
+      }],
+      ['GET https://static', () => new Response('error code: 502', { status: 502 })],
+    ];
+    const exhausted = context(routes);
+    await expect(fetchHentaiCosplayXxx({}, exhausted, nextFiles(20))).rejects.toMatchObject({ code: 'HTTP_ERROR', status: 502, provider: 'hentai-cosplay-xxx.com' });
+    expect(exhausted.calls).toHaveLength(6);
 
-  it('gives up after three dead covers, or at once when the budget runs out', async () => {
-    const dead = [['GET https://static1.hentai-cosplay-xxx.com/', () => new Response('error code: 502', { status: 502 })], ...hentaiFeedRoutes];
-    const pagesFrom = (first) => {
-      let page = first;
-      return { randomInteger: () => page++, choose: (items) => items[0] };
-    };
-    const exhausted = context(dead);
-    await expect(fetchHentaiCosplayXxx({}, exhausted, pagesFrom(7)))
-      .rejects.toMatchObject({ code: 'HTTP_ERROR', status: 502, provider: 'hentai-cosplay-xxx.com' });
-    expect(exhausted.calls).toHaveLength(7);
-
-    const budgeted = context(dead, { http: { budget: new SubrequestBudget(3) } });
-    await expect(fetchHentaiCosplayXxx({}, budgeted, pagesFrom(7))).rejects.toMatchObject({ code: 'BUDGET_EXHAUSTED' });
+    resetHentaiCosplayStateForTests();
+    const budgeted = context(routes, { http: { budget: new SubrequestBudget(3) } });
+    await expect(fetchHentaiCosplayXxx({}, budgeted, nextFiles(20))).rejects.toMatchObject({ code: 'BUDGET_EXHAUSTED' });
     expect(budgeted.calls).toHaveLength(3);
   });
 
@@ -441,6 +517,8 @@ describe('cosplay feeds', () => {
 });
 
 describe('PornPics cover feed', () => {
+  beforeEach(() => resetPornPicsStateForTests());
+
   it('promotes covers to /1280/ and reads the item ceiling', () => {
     expect(highResolutionPornPicsCover('https://cdni.pornpics.com/460/7/94/87445724/87445724_095_f50d.jpg'))
       .toBe('https://cdni.pornpics.com/1280/7/94/87445724/87445724_095_f50d.jpg');
@@ -448,5 +526,59 @@ describe('PornPics cover feed', () => {
     expect(pornPicsItemCeiling('<script>var P_MAX = 100;</script>')).toBe(1_000);
     const html = '<a href="/galleries/x-1/"><img data-src="https://cdni.pornpics.com/460/1/2/3/3_1.jpg"></a>';
     expect(extractPornPicsCovers(html)).toEqual(['https://cdni.pornpics.com/1280/1/2/3/3_1.jpg']);
+  });
+
+  it('reads the category page once, then picks a random offset directly', async () => {
+    const category = 'https://www.pornpics.com/butt-plug/';
+    const offsetUrl = (offset) => `${category}?offset=${offset}`;
+    const coverUrl = (offset, size) => `https://cdni.pornpics.com/${size}/1/2/${offset}/${offset}_1.jpg`;
+    const ctx = context([
+      [`GET ${category}?offset=`, (request) => {
+        const offset = new URL(request.url).searchParams.get('offset');
+        return json([{ gid: Number(offset), t_url_460: coverUrl(offset, 460) }]);
+      }],
+      [`GET ${category}`, () => new Response('<script>var P_MAX = 100;</script>')],
+      ['GET https://cdni.pornpics.com/1280/', () => image('image/jpeg')],
+    ]);
+    const ranges = [];
+    const offsets = [500, 7];
+    const dependencies = {
+      randomInteger: (minimum, maximum) => {
+        ranges.push([minimum, maximum]);
+        return offsets.shift();
+      },
+    };
+
+    expect(await fetchPornPics({ endpoint: category }, ctx, dependencies)).toMatchObject({ id: '500', url: coverUrl(500, 1280) });
+    expect(await fetchPornPics({ endpoint: category }, ctx, dependencies)).toMatchObject({ id: '7', url: coverUrl(7, 1280) });
+    // Offset 0 is the category page itself, so the cached range starts at 1.
+    expect(ranges).toEqual([[0, 999], [1, 999]]);
+    expect(ctx.calls.map((request) => request.url)).toEqual([
+      category, offsetUrl(500), coverUrl(500, 1280),
+      offsetUrl(7), coverUrl(7, 1280),
+    ]);
+  });
+
+  it('counts the galleries again when a remembered offset no longer exists', async () => {
+    const category = 'https://www.pornpics.com/butt-plug/';
+    const coverUrl = (offset, size) => `https://cdni.pornpics.com/${size}/1/2/${offset}/${offset}_1.jpg`;
+    let pages = 100;
+    const ctx = context([
+      [`GET ${category}?offset=`, (request) => {
+        const offset = Number(new URL(request.url).searchParams.get('offset'));
+        return json(offset < pages * 10 ? [{ gid: offset, t_url_460: coverUrl(offset, 460) }] : []);
+      }],
+      [`GET ${category}`, () => new Response(`<script>var P_MAX = ${pages};</script>`)],
+      ['GET https://cdni.pornpics.com/1280/', () => image('image/jpeg')],
+    ]);
+    const offsets = [500, 900, 300];
+    const dependencies = { randomInteger: () => offsets.shift() };
+
+    await fetchPornPics({ endpoint: category }, ctx, dependencies);
+    pages = 50;
+    expect(await fetchPornPics({ endpoint: category }, ctx, dependencies)).toMatchObject({ id: '300' });
+    expect(ctx.calls.slice(3).map((request) => request.url)).toEqual([
+      `${category}?offset=900`, category, `${category}?offset=300`, coverUrl(300, 1280),
+    ]);
   });
 });

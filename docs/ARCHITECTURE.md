@@ -1,18 +1,18 @@
 # Architecture
 
-The bot is one Cloudflare Worker (`src/index.js`) with three Durable Object
+The bot is one Cloudflare Worker (`src/index.js`) with two Durable Object
 classes and a cron trigger. All Discord traffic uses the raw HTTP API v10 and
 Gateway v10; no Discord client library is involved.
 
 ```
 Discord ──HTTPS POST /interactions──▶ Worker fetch()
-                                        │ verify Ed25519, route
+                                        │ verify Ed25519, route, UserQuota DO (reserve)
                                         ├─ inline response (help, autocomplete, modal, invite, refusals)
-                                        └─ deferred response + ctx.waitUntil(task)
-                                              ├─ UserQuota DO (reserve → commit/rollback)
-                                              ├─ CosplayPool DO (ready /cosplay links; refills in alarms)
-                                              ├─ media providers (fetch, bounded)
-                                              └─ PATCH /webhooks/{app}/{token}/messages/@original
+                                        └─ media, /ping, /premium: start the work at once
+                                              ├─ ready ≤ ~1.5 s, no file ─▶ the message is the inline response
+                                              └─ upload or slower ─▶ deferred response + ctx.waitUntil()
+                                                    └─ PATCH /webhooks/{app}/{token}/messages/@original
+                                        (media providers: fetch, bounded; quota commit/rollback afterwards)
 
 Cron (every minute) ──▶ Worker scheduled()
                           ├─ sync application commands (once per isolate)
@@ -31,8 +31,8 @@ Cron (every minute) ──▶ Worker scheduled()
    (`src/http/signature.js`, Web Crypto `Ed25519`; the imported key is cached
    per isolate).
 2. Parses the interaction and hands it to `InteractionRouter`.
-3. Returns the router's response body as JSON and passes any background task
-   to `ctx.waitUntil()`.
+3. Returns the router's response body as JSON and passes any follow-up task
+   (a webhook edit, a quota commit) to `ctx.waitUntil()`.
 
 `src/runtime.js` builds the per-isolate objects once per `env`: config,
 structured logger, router, circuit breaker, quota client, and REST clients.
@@ -47,7 +47,20 @@ return response descriptors from `src/discord/responses.js`:
 - inline: `reply`, `ephemeral`, `updateMessage`, `modal`,
   `autocompleteResult`;
 - deferred: `deferred(task)` for commands and `deferredUpdate(task)` for
-  components, where `task` runs after the acknowledgement.
+  components, where `task` runs after the acknowledgement;
+- `respondWhenReady(prepare)`, used by media commands, `/ping`, and
+  `/premium`, where `prepare` builds the finished message.
+
+For `respondWhenReady`, the router starts `prepare` at once and waits for it
+until 1.5 seconds after the request arrived, or 2.4 seconds after Discord
+created the interaction, whichever is sooner. A message that is ready by
+then and has no file becomes the initial response (a new message for
+commands, an in-place update for components), which saves both the loading
+state and the follow-up edit. Otherwise the router sends a deferred response
+and edits the message in when `prepare` finishes; the work is never started
+twice. A message with a file always takes that path, because a file cannot
+be sent in the HTTP response, and `prepare` reports when a download starts
+(`willUpload`) so the acknowledgement does not wait for it.
 
 Before a command runs, the router applies the NSFW guard
 (`src/brain/nsfw-guard.js`) and the quota gate. Deferred tasks are wrapped so
@@ -56,11 +69,11 @@ an error embed, and expired interactions are logged as warnings. Legacy
 `refresh_*` button IDs from the original bot still route to the right command
 and option.
 
-Inline responses are processed by Discord after the HTTP reply arrives, so a
-very fast follow-up edit could reach Discord first. `InteractionWebhook`
-retries `10015`/`10008`/`404` for a few seconds after receipt to cover that
-window, and bounds each edit's timeout to the 30-second `waitUntil` window.
-Interaction webhooks never carry the bot token.
+Deferred responses are processed by Discord after the HTTP reply arrives, so
+a very fast follow-up edit could reach Discord first. `InteractionWebhook`
+retries `10015`/`10008`/`404` after 250 ms and then 750 ms during the first
+five seconds to cover that window, and bounds each edit's timeout to the
+30-second `waitUntil` window. Interaction webhooks never carry the bot token.
 
 ## Media pipeline
 
@@ -77,15 +90,24 @@ source list or option groups. A request:
    `MAX_SUBREQUESTS` minus two;
 3. tries providers until one returns a usable result, skipping providers whose
    circuit is open and stopping when the deadline or budget is exhausted;
-4. edits the original response with the embed, Refresh and Link buttons, and,
-   for downloaded media, a `multipart/form-data` upload referenced as
+4. builds the message with the embed and Refresh and Link buttons, which the
+   router sends as the initial response or as an edit of it; downloaded
+   media goes with an edit as a `multipart/form-data` upload referenced as
    `attachment://media.<ext>`.
+
+Sources switched off by `WAIFU_PICS` or `AHOTTIE` are removed from the pool
+in step 1, before any request.
 
 The HTTP client streams bodies with a running byte count (compressed bodies
 can inflate past `Content-Length`), validates hosts before and after
 redirects, distinguishes provider `TIMEOUT` from invocation
 `DEADLINE_EXCEEDED`, and, for downloads that will be embedded, identifies the
-image by magic bytes so block pages served as `200` are never uploaded. Only
+image by magic bytes so block pages served as `200` are never uploaded. A
+provider must send its response headers within 4 seconds (8 for the cosplay
+feed pages), so a stalled host fails over without waiting out the full
+timeout. `textPrefix()` reads only the start of a file, unpacking gzip on the
+way, and cancels the rest of the transfer; `/cosplay` uses it for the site's
+image sitemaps. Only
 JPEG, PNG, GIF, and WebP are accepted, because Discord embeds only those.
 Downloads that match a known "image unavailable" placeholder are rejected,
 and `/cosplay` also requires at least 300 pixels in each direction, read from
@@ -105,28 +127,27 @@ a random 30–120 seconds, then lets one real request probe it. Deadline and
 budget exhaustion are neutral; the breaker lives in isolate memory, so each
 isolate learns independently.
 
-## Cosplay link pool
+## Media is fetched only for a request
 
-hentai-cosplay-xxx.com builds every feed page on demand, which takes 0.5–4.5
-seconds; only its first page is cached. `CosplayPool`
-(`src/durable/cosplay-pool.js`) is one shared object that keeps about 30
-direct image links ready:
+No media, listing, or provider API is read outside a user's request: there
+are no prefetches, background refills, or media alarms. The only work after
+the response is the user's own request finishing (a webhook edit and the
+quota commit). An earlier version kept `/cosplay` links ready in a
+`CosplayPool` Durable Object; its class is deleted by the `v3` migration in
+`wrangler.jsonc`.
 
-- **Serving.** `take()` hands out one random link and removes it. The
-  provider then downloads and checks the image exactly as before. A pool call
-  that fails or takes longer than one second falls back to reading a feed
-  page directly.
-- **Refilling.** Below 20 links, an alarm reads up to four random feed pages
-  and adds at most five links from each, so consecutive images come from
-  different parts of the site. The page count is re-read every six hours.
-- **Dead servers.** Before a page's links are added, one ranged request reads
-  the first 4 KiB of a file from each image server on the page. A server
-  that fails, or one a user's download reports through `reportDeadHost()`, is
-  dropped from the pool for 30 minutes along with all of its links.
-- **Persistence.** Links survive restarts and deployments in the object's
-  SQLite storage. A failed refill reschedules itself for a minute later.
+Each isolate keeps a few facts that its own requests learned, in memory
+only:
 
-The pool holds only links; image bytes are never cached.
+- the PornPics gallery count, for an hour, so later `/buttplug` requests
+  skip the category page;
+- cosplay image servers that just failed, for ten minutes, and the cosplay
+  feed's page count, for an hour;
+- the provider circuit breaker below.
+
+The Waifu archive's index is bundled with the code
+(`src/brain/providers/waifu-archive-index.js`), because the archive is
+frozen. Image bytes are never cached.
 
 ## Quotas
 

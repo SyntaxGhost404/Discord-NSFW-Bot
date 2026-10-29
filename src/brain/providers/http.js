@@ -2,6 +2,9 @@ import { MediaProviderError } from './errors.js';
 
 const DEFAULT_JSON_BYTES = 1024 * 1024;
 const DEFAULT_TEXT_BYTES = 2 * 1024 * 1024;
+// A provider that has not started answering by now is treated as down, so
+// the next source gets its turn instead of waiting out the full timeout.
+const DEFAULT_HEADERS_TIMEOUT_MS = 4_000;
 
 // Discord renders attachment:// images in embeds only for these formats.
 export const EMBEDDABLE_IMAGE_TYPES = Object.freeze(new Set([
@@ -172,11 +175,10 @@ async function readBounded(response, maximumBytes) {
   return bytes;
 }
 
-// Reads at most `length` bytes and then cancels the body, so a server that
-// ignores a Range header cannot make a short read download a whole file.
-async function readPrefix(response, length) {
-  if (!response.body) return new Uint8Array(0);
-  const reader = response.body.getReader();
+// Reads at most `length` bytes from a stream and then cancels it, so only
+// the start of a large file is ever transferred.
+async function readPrefix(stream, length) {
+  const reader = stream.getReader();
   const bytes = new Uint8Array(length);
   let received = 0;
   while (received < length) {
@@ -188,6 +190,36 @@ async function readPrefix(response, length) {
   }
   await reader.cancel().catch(() => {});
   return bytes.subarray(0, received);
+}
+
+// Some servers send a .gz file as is, without Content-Encoding. Its first
+// bytes decide whether the body is unpacked on the way.
+async function readTextPrefix(response, length) {
+  if (!response.body) return new Uint8Array(0);
+  const source = response.body.getReader();
+  try {
+    const first = await source.read();
+    if (first.done) return new Uint8Array(0);
+    let stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(first.value);
+      },
+      async pull(controller) {
+        const { done, value } = await source.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      cancel(reason) {
+        return source.cancel(reason);
+      },
+    });
+    if (first.value[0] === 0x1f && first.value[1] === 0x8b) stream = stream.pipeThrough(new DecompressionStream('gzip'));
+    return await readPrefix(stream, length);
+  } finally {
+    // Cancelling the unpacked side does not reliably reach the download, so
+    // the download itself is cancelled once the prefix is read.
+    await source.cancel().catch(() => {});
+  }
 }
 
 export class SubrequestBudget {
@@ -218,6 +250,8 @@ export class MediaHttpClient {
     fetchImpl = (...args) => fetch(...args),
     now = Date.now,
     placeholders = KNOWN_PLACEHOLDERS,
+    headersTimeoutMs = DEFAULT_HEADERS_TIMEOUT_MS,
+    onDownload = null,
   }) {
     this.timeoutMs = timeoutMs;
     this.maximumBytes = maximumBytes;
@@ -227,6 +261,8 @@ export class MediaHttpClient {
     this.fetch = fetchImpl;
     this.now = now;
     this.placeholders = placeholders;
+    this.headersTimeoutMs = headersTimeoutMs;
+    this.onDownload = onDownload;
   }
 
   remainingTime() {
@@ -253,20 +289,20 @@ export class MediaHttpClient {
     return new TextDecoder().decode(bytes);
   }
 
-  // Reads only the first `length` bytes of a file with a Range request, for a
-  // cheap check that its server is up and serving images.
-  async peek(url, options = {}) {
-    const length = options.length ?? 4_096;
-    const headers = { ...(options.headers ?? {}), Range: `bytes=0-${length - 1}` };
-    const { bytes } = await this.#request(url, { ...options, headers }, (response) => readPrefix(response, length));
-    return bytes;
+  // Reads only the first `length` bytes of a text file, unpacking it first
+  // when it is gzip, and cancels the rest of the transfer.
+  async textPrefix(url, options = {}) {
+    const { bytes } = await this.#request(url, options, (response) => readTextPrefix(response, options.length ?? 64 * 1024));
+    return new TextDecoder().decode(bytes);
   }
 
   // Downloads media for re-upload. With `expectImage`, the bytes must be an
   // image format Discord can show inside an embed and must not be a known
   // placeholder; `minimumDimension` also requires a readable header with at
-  // least that many pixels in each direction.
+  // least that many pixels in each direction. `onDownload` hears about each
+  // download as it starts, since the result will most likely be a file.
   async buffer(url, options = {}) {
+    this.onDownload?.();
     const maximumBytes = Math.min(options.maximumBytes ?? this.maximumBytes, this.maximumBytes);
     const result = await this.#request(url, options, (response) => readBounded(response, maximumBytes));
     const { bytes, response } = result;
@@ -317,10 +353,19 @@ export class MediaHttpClient {
     }
     const timeout = Math.min(configuredTimeout, remaining);
     const clippedByDeadline = timeout < configuredTimeout;
+    const headersTimeout = options.headersTimeoutMs ?? this.headersTimeoutMs;
     this.budget?.take();
 
     const timeoutSignal = AbortSignal.timeout(timeout);
-    const signal = this.signal ? AbortSignal.any([timeoutSignal, this.signal]) : timeoutSignal;
+    // The first-byte timeout stops at the response headers; the full timeout
+    // still bounds reading a large body.
+    const headersController = new AbortController();
+    const headersTimer = headersTimeout < timeout
+      ? setTimeout(() => headersController.abort(new Error('No response headers in time.')), headersTimeout)
+      : null;
+    const signals = [timeoutSignal, headersController.signal];
+    if (this.signal) signals.push(this.signal);
+    const signal = AbortSignal.any(signals);
     try {
       const response = await this.fetch(parsed.toString(), {
         method: options.method ?? 'GET',
@@ -329,6 +374,7 @@ export class MediaHttpClient {
         redirect: 'follow',
         signal,
       });
+      clearTimeout(headersTimer);
       if (!response.ok) {
         await response.body?.cancel();
         throw new MediaProviderError(`Provider returned HTTP ${response.status}.`, {
@@ -340,7 +386,11 @@ export class MediaHttpClient {
       const bytes = await consume(response);
       return { bytes, response };
     } catch (error) {
+      clearTimeout(headersTimer);
       if (error instanceof MediaProviderError) throw error;
+      if (headersController.signal.aborted && !timeoutSignal.aborted) {
+        throw new MediaProviderError(`Provider did not start responding within ${headersTimeout} ms.`, { code: 'TIMEOUT', cause: error });
+      }
       if (timeoutSignal.aborted) {
         throw new MediaProviderError(
           clippedByDeadline ? 'The media deadline elapsed during the request.' : 'Media request timed out.',

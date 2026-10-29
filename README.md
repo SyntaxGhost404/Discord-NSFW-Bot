@@ -13,23 +13,32 @@ WebSockets) plus Workers bindings.
   autocomplete, and modal to the Worker's `/interactions` endpoint. Each
   request's Ed25519 signature is verified with Web Crypto before anything is
   parsed; invalid signatures get `401`, as Discord's endpoint checks require.
-- **Instant acknowledgements.** Help pages, autocomplete, modals, invites,
-  NSFW-channel refusals, and cooldown notices are answered inline in the HTTP
-  response. Media, `/ping`, and `/premium` acknowledge with a deferred
-  response and finish in `ctx.waitUntil()`, editing the original message.
+- **Answers in the first response.** Help pages, autocomplete, modals,
+  invites, NSFW-channel refusals, and cooldown notices are answered inline in
+  the HTTP response. Media, `/ping`, and `/premium` start their work at once
+  and send the finished message as that same response when it is ready within
+  about 1.5 seconds and needs no upload, so most linked media appears with no
+  loading state at all. Uploads and slower results acknowledge first (uploads
+  as soon as their download starts) and are edited in from
+  `ctx.waitUntil()`.
 - **A bounded media pipeline.** Each media request tries its command's
   providers in order (shuffled, except `/cosplay`) inside a 24-second deadline
-  and a subrequest budget sized for the Workers Free plan, then edits the
-  loading message with an embed or a native attachment. A per-isolate circuit
-  breaker skips providers that keep failing.
+  and a subrequest budget sized for the Workers Free plan. A provider that
+  sends no response headers within 4 seconds is dropped for the next one, and
+  a per-isolate circuit breaker skips providers that keep failing. Providers
+  that no longer work are switched off by a variable and skipped before any
+  request (see [Configuration](#configuration)).
 - **Quotas in Durable Objects.** Each Discord user has a SQLite-backed
   `UserQuota` Durable Object, so DMs, group DMs, and every server share one
   strongly consistent quota. Capacity is reserved before any provider is
   contacted and charged only when media is actually displayed.
-- **Ready-made `/cosplay` links.** The cosplay site takes 0.5–4.5 seconds to
-  build each feed page, so a `CosplayPool` Durable Object reads random pages
-  in the background and keeps about 30 image links ready. A `/cosplay` request
-  only downloads and checks one image.
+- **Fast `/cosplay` without background work.** The cosplay site takes
+  0.5–4.5 seconds to build a feed page, so `/cosplay` reads the start of one
+  of the site's image sitemaps instead. They are cached at Cloudflare's edge,
+  only a few KB is transferred, and a request takes about a second in total.
+- **Media is fetched only for a request.** Nothing is prefetched or refreshed
+  in the background. Each isolate remembers only small facts its own requests
+  learned, such as a gallery's size or an image server that is down.
 - **Optional Gateway presence.** A `DiscordGateway` Durable Object keeps one
   outbound Gateway WebSocket per shard so the bot appears online and answers a
   message that is only an @mention with the welcome card. Sessions resume
@@ -138,7 +147,9 @@ Secrets (set with `wrangler secret put`, or in `.dev.vars` locally):
 | `DISCORD_BOT_TOKEN` | yes | Command registration, Gateway session, mention replies, `/ping` (legacy `BOT_TOKEN` accepted). |
 | `NEKOBOT_AUTHORIZATION` | for NekoBot | `Authorization` header for nekobot.xyz; without it NekoBot sources are skipped. |
 
-Variables (in `wrangler.jsonc` → `vars`):
+Variables (in `wrangler.jsonc` → `vars`). A provider that stops working is
+switched off with its variable rather than removed, so setting the variable
+to `"true"` and redeploying brings it back:
 
 | Name | Default | Purpose |
 | --- | --- | --- |
@@ -148,8 +159,8 @@ Variables (in `wrangler.jsonc` → `vars`):
 | `GATEWAY_SHARD_COUNT` | `1` | Gateway shards; Discord requires sharding past 2,500 servers. |
 | `GATEWAY_ACTIVITY` | empty | Optional custom status text. |
 | `PREMIUM_USER_IDS` | empty | Comma-separated Premium user IDs. |
-| `WAIFU_PICS` | `false` | Enables the Waifu.pics sources. |
-| `AHOTTIE` | `false` | Enables Ahottie as the `/cosplay` fallback. Its images are hosted on imgbox, which currently serves only placeholders. |
+| `WAIFU_PICS` | `false` | Turns the Waifu.pics sources back on. Off because the API refuses every connection (October 2026). |
+| `AHOTTIE` | `false` | Turns Ahottie back on as the `/cosplay` fallback. Off because its images are hosted on imgbox, which serves only placeholders (October 2026). |
 | `MEDIA_TIMEOUT_MS` | `10000` | Per-request provider timeout. |
 | `MEDIA_DEADLINE_MS` | `24000` | Total time for a media request, inside the 30 s `waitUntil()` window. |
 | `MAX_MEDIA_BYTES` | `10485760` | Largest re-uploaded file; a lower interaction `attachment_size_limit` wins. |
@@ -160,9 +171,10 @@ Variables (in `wrangler.jsonc` → `vars`):
 
 Everything runs on the Workers Free plan, with these trade-offs:
 
-- **CPU:** Free invocations get 10 ms of CPU. JSON providers use about 1–2 ms;
-  the HTML-scraping sources (`/cosplay`, `/buttplug` Real, `/gif`) use more.
-  The Paid plan's 30-second default removes that concern.
+- **CPU:** Free invocations get 10 ms of CPU. JSON providers use about 1–2 ms.
+  The scraping sources (`/cosplay`, `/buttplug` Real, `/gif`) use more, so
+  they read as little as possible: `/cosplay` unpacks only the first 96 KB of
+  a sitemap. The Paid plan's 30-second default removes that concern.
 - **Subrequests:** Free invocations may make 50. `MAX_SUBREQUESTS=45` keeps
   room for the Discord edit; on Paid you can raise it.
 - **Gateway duration:** an open Gateway WebSocket keeps its Durable Object
@@ -170,8 +182,7 @@ Everything runs on the Workers Free plan, with these trade-offs:
   plan's 13,000 GB-s daily allowance and the Paid plan's 400,000 GB-s monthly
   allowance, but it is most of the Free budget. Use `GATEWAY_MODE=off` for an
   HTTP-only bot (commands still work; the bot shows offline and ignores
-  mentions). The `CosplayPool` object is active only for the few seconds
-  each background refill takes.
+  mentions).
 
 ## Local development
 

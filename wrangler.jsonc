@@ -17,13 +17,15 @@
 	"durable_objects": {
 		"bindings": [
 			{ "name": "USER_QUOTA", "class_name": "UserQuota" },
-			{ "name": "GATEWAY", "class_name": "DiscordGateway" },
-			{ "name": "COSPLAY_POOL", "class_name": "CosplayPool" }
+			{ "name": "GATEWAY", "class_name": "DiscordGateway" }
 		]
 	},
 	"migrations": [
 		{ "tag": "v1", "new_sqlite_classes": ["UserQuota", "DiscordGateway"] },
-		{ "tag": "v2", "new_sqlite_classes": ["CosplayPool"] }
+		{ "tag": "v2", "new_sqlite_classes": ["CosplayPool"] },
+		// The background cosplay link pool was removed: media is only ever
+		// fetched while a user's command runs.
+		{ "tag": "v3", "deleted_classes": ["CosplayPool"] }
 	],
 	"version_metadata": {
 		"binding": "CF_VERSION_METADATA"

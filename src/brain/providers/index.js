@@ -13,6 +13,19 @@ import { fetchWaifuArchive } from './waifu-archive.js';
 import { fetchWaifuPics } from './waifu-pics.js';
 import { MediaProviderError } from './errors.js';
 
+// Providers that are dead stay off unless their variable is "true":
+// WAIFU_PICS for Waifu.pics and AHOTTIE for Ahottie. A source whose provider
+// is off is skipped before any request.
+const SWITCHED_PROVIDERS = Object.freeze({
+  ahottie: 'ahottieEnabled',
+  waifupics: 'waifuPicsEnabled',
+});
+
+export function providerEnabled(provider, config) {
+  const flag = SWITCHED_PROVIDERS[provider];
+  return !flag || config?.[flag] === true;
+}
+
 const providers = Object.freeze({
   abd: fetchAbd,
   ahottie: fetchAhottie,

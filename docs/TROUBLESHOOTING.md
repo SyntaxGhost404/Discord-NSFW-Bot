@@ -45,8 +45,11 @@ three seconds.
 
 ## The reply is stuck on "is thinking…"
 
-The acknowledgement arrived, but the edit with the result did not. Search the
-logs for the interaction ID.
+Most linked media, `/ping`, and `/premium` arrive in the first response with
+no loading state. Uploads and anything slower than about 1.5 seconds show
+"is thinking…" until an edit delivers the result. If it stays, the
+acknowledgement arrived but the edit did not. Search the logs for the
+interaction ID.
 
 - **"Deferred interaction task failed."** The task threw an error, and the bot
   tried to replace the loading message with a generic error. The log includes
@@ -68,7 +71,7 @@ The embed text says which case applies:
 | Message | Meaning |
 | --- | --- |
 | Every available media source timed out. Please try again shortly. | A provider exceeded `MEDIA_TIMEOUT_MS`, or the request ran out of `MEDIA_DEADLINE_MS`. |
-| The required media provider is not configured. Check the provider secrets. | Every source for the command is disabled. Commands served only by NekoBot (`/4k`, `/gonewild`, `/kitsune`, `/midriff`, `/tentacle`, `/thigh`, and the Real style of `/anal`, `/blowjob`, and `/feet`) need `NEKOBOT_AUTHORIZATION`. |
+| The media sources for this command are turned off or not configured. | Every source for the command is switched off or missing its secret. Commands served only by NekoBot (`/4k`, `/gonewild`, `/kitsune`, `/midriff`, `/tentacle`, `/thigh`, and the Real style of `/anal`, `/blowjob`, and `/feet`) need `NEKOBOT_AUTHORIZATION`. |
 | No media source returned a usable result. Please try again. | Every source answered, but none produced usable media. |
 
 Each failed attempt is logged as "Media source failed; trying the next
@@ -82,12 +85,12 @@ configured source." with the `provider` and an error `code`:
 | `IMAGE_TOO_SMALL` | The image was smaller than the source's minimum size (300 pixels in each direction for `/cosplay`). |
 | `UNEXPECTED_HOST` | The provider returned or redirected to a host outside its allowlist. |
 | `TOO_LARGE` | The file was larger than `MAX_MEDIA_BYTES` or the server's upload limit. |
-| `TIMEOUT` | The provider took longer than its per-request timeout. |
+| `TIMEOUT` | The provider sent no response headers within 4 seconds (8 for cosplay feed pages), or took longer than its per-request timeout. |
 | `DEADLINE_EXCEEDED` | The media request's overall deadline ran out. |
 | `BUDGET_EXHAUSTED` | The request used its `MAX_SUBREQUESTS` allowance. |
 | `NETWORK_ERROR` | The connection failed before an HTTP response arrived. |
 | `CIRCUIT_OPEN` | The provider failed three times in a row and is skipped for 30–120 seconds in this isolate (logged once as "Media provider circuit opened after consecutive failures."). |
-| `PROVIDER_DISABLED` | A required secret is missing, or `WAIFU_PICS` or `AHOTTIE` is off. Logged at `debug` level, because both are off by default. |
+| `PROVIDER_DISABLED` | A required secret is missing (NekoBot without `NEKOBOT_AUTHORIZATION`). Logged at `debug` level. Sources switched off by `WAIFU_PICS` or `AHOTTIE` never get this far: they are dropped before any attempt and not logged. |
 
 ### N-SFW (ABD) failures
 
@@ -111,10 +114,9 @@ image is replaced with another one, up to three per provider. Set
 another." with its `code`.
 
 - **Hentai-cosplay-xxx (primary).** Several of its image servers answer `502`
-  for every file. The `CosplayPool` object checks each server before adding
-  its links and drops a server for 30 minutes when a download reports it
-  down. Without the pool, each retry reads a new random feed page, which
-  almost always lands on a working server.
+  for every file. A server that fails is skipped for ten minutes by that
+  isolate, and each retry reads a new random sitemap, which almost always
+  lands on a working server.
 - **Ahottie (fallback, off by default).** Its images are hosted on imgbox. In
   October 2026 imgbox answered every request with the same "Thumbnail
   Temporarily Unavailable" picture, which is rejected as `PLACEHOLDER_IMAGE`.
@@ -123,16 +125,16 @@ another." with its `code`.
   attempts fail. Turn Ahottie back on only once imgbox serves real images
   again.
 
-`/cosplay` normally answers in about a second, because its links come from
-the `CosplayPool` object. If it takes several seconds again, check the logs:
-
-- **"Cosplay pool did not answer in time; reading the feed directly."** or
-  **"Cosplay pool call failed; reading the feed directly."** The pool took
-  longer than one second or returned an error. The request still works, just
-  at the old speed.
-- **"Cosplay pool refill failed."** The pool could not read the site, and it
-  tries again a minute later. A pool that has run dry is refilled
-  automatically once the site answers again.
+`/cosplay` normally answers in about a second, because it reads the start of
+one of the site's edge-cached image sitemaps instead of a feed page. If it
+takes several seconds again, look for **"Cosplay sitemaps are unavailable;
+reading feed pages instead."** The sitemap could not be read (`code` and
+`status` say why) or no longer lists images in the expected format, so the
+request fell back to feed pages, which the site takes 0.5–4.5 seconds to
+build. The command still works, just more slowly. If the site has moved its
+sitemaps, check `robots.txt` and update `HENTAI_COSPLAY_SITEMAP` in
+`src/brain/providers/manifest.js` (and `SITEMAP_FILES` in
+`hentai-cosplay-xxx.js` if the number of files changed).
 
 If a host starts sending a new stand-in picture, add its byte size and SHA-256
 to `KNOWN_PLACEHOLDERS` in `src/brain/providers/http.js`:
@@ -278,6 +280,7 @@ reply "This interaction is no longer available.", which is intentional.
   `cloudflared tunnel --url http://localhost:8787` and point a test
   application's Interactions Endpoint URL at the tunnel URL plus
   `/interactions`.
-- If a deployment fails with a Durable Objects migration error, keep the
-  `new_sqlite_classes` migration in `wrangler.jsonc`: new Durable Object
-  namespaces must use SQLite storage.
+- If a deployment fails with a Durable Objects migration error, keep every
+  migration in `wrangler.jsonc` as it is: new Durable Object namespaces must
+  use SQLite storage, and the `v3` migration deletes the retired
+  `CosplayPool` class from deployments that had it.

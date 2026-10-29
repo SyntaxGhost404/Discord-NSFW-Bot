@@ -216,10 +216,10 @@ const MAXIMUM_ATTEMPTS = 3;
 // Real cosplay photos are hundreds of pixels on each side; "image
 // unavailable" stand-ins and icons are smaller.
 const MINIMUM_PHOTO_DIMENSION = 300;
-const STOP_CODES = new Set(['BUDGET_EXHAUSTED', 'DEADLINE_EXCEEDED', 'ABORTED']);
+export const STOP_CODES = new Set(['BUDGET_EXHAUSTED', 'DEADLINE_EXCEEDED', 'ABORTED']);
 
-function feedRequestOptions(feed) {
-  return { headers: HTML_HEADERS, allowedHosts: feed.feedHosts, maximumBytes: MAXIMUM_FEED_BYTES };
+export function feedRequestOptions(feed) {
+  return { headers: HTML_HEADERS, allowedHosts: feed.feedHosts, maximumBytes: MAXIMUM_FEED_BYTES, headersTimeoutMs: feed.headersTimeoutMs };
 }
 
 export function mediaRequestHeaders(feed) {
@@ -249,75 +249,65 @@ export function hostIsFailing(error) {
     || (error?.code === 'HTTP_ERROR' && error.status >= 500);
 }
 
+// Downloads one image and checks it like every cosplay image: a real JPEG,
+// PNG, GIF, or WebP of at least 1 KiB and 300 pixels in each direction that
+// is not a known placeholder, served from the feed's own image hosts.
+export async function downloadCosplayImage(context, feed, url) {
+  const download = await context.http.buffer(url, {
+    headers: mediaRequestHeaders(feed),
+    allowedHosts: feed.mediaHosts,
+    minimumBytes: 1_024,
+    expectImage: true,
+    minimumDimension: MINIMUM_PHOTO_DIMENSION,
+  });
+  const resolvedUrl = httpsUrl(download.finalUrl || url, url);
+  if (!resolvedUrl) {
+    throw new MediaProviderError(`${feed.provider} media redirected to an insecure or invalid URL.`, {
+      code: 'INVALID_URL',
+    });
+  }
+  return { url: resolvedUrl.toString(), download };
+}
+
 // Picks a random feed page and downloads one direct image from it without
 // ever opening a gallery. Up to three images are tried. With
 // `freshPagePerAttempt`, every retry reads a new random page, which escapes a
 // feed page whose image server is down; otherwise retries use other images
-// from the same page, which avoids parsing another large page. A `pool`
-// supplies links prepared in the background, so no feed page is read while
-// it has any; its links are downloaded and checked exactly like the others.
+// from the same page, which avoids parsing another large page.
 export async function fetchRandomCosplayAttachment(feed, context, dependencies = defaultDependencies) {
-  const { provider, pageUrl, extractMedia, mediaHosts, freshPagePerAttempt = false, pool = null } = feed;
-  const mediaHeaders = mediaRequestHeaders(feed);
+  const { provider, pageUrl, extractMedia, freshPagePerAttempt = false } = feed;
   const attempted = new Set();
   let discovery = null;
   let page = null;
   let candidates = [];
   let lastError = null;
   for (let attempt = 0; attempt < MAXIMUM_ATTEMPTS; attempt += 1) {
-    let selectedUrl = null;
-    let origin = 'feed';
     try {
-      const pooled = pool ? await pool.take() : null;
-      if (pooled && !attempted.has(pooled.url)) {
-        ({ url: selectedUrl, page } = pooled);
-        origin = 'pool';
-      } else {
-        let remaining = candidates.filter((url) => !attempted.has(url));
-        if (page === null || freshPagePerAttempt || remaining.length === 0) {
-          discovery ??= await readFeedCeiling(context.http, feed);
-          const nextPage = dependencies.randomInteger(1, discovery.ceiling);
-          const selectedPageUrl = pageUrl(nextPage);
-          const feedHtml = nextPage === 1
-            ? discovery.html
-            : await context.http.text(selectedPageUrl, feedRequestOptions(feed));
-          candidates = extractMedia(feedHtml, selectedPageUrl);
-          page = nextPage;
-          remaining = candidates.filter((url) => !attempted.has(url));
-        }
-        selectedUrl = dependencies.choose(remaining);
-        if (!selectedUrl) {
-          throw new MediaProviderError(`${provider} feed did not contain a usable direct image.`, {
-            code: 'INVALID_RESPONSE',
-          });
-        }
+      let remaining = candidates.filter((url) => !attempted.has(url));
+      if (page === null || freshPagePerAttempt || remaining.length === 0) {
+        discovery ??= await readFeedCeiling(context.http, feed);
+        const nextPage = dependencies.randomInteger(1, discovery.ceiling);
+        const selectedPageUrl = pageUrl(nextPage);
+        const feedHtml = nextPage === 1
+          ? discovery.html
+          : await context.http.text(selectedPageUrl, feedRequestOptions(feed));
+        candidates = extractMedia(feedHtml, selectedPageUrl);
+        page = nextPage;
+        remaining = candidates.filter((url) => !attempted.has(url));
       }
-      attempted.add(selectedUrl);
-      const download = await context.http.buffer(selectedUrl, {
-        headers: mediaHeaders,
-        allowedHosts: mediaHosts,
-        minimumBytes: 1_024,
-        expectImage: true,
-        minimumDimension: MINIMUM_PHOTO_DIMENSION,
-      });
-      const resolvedUrl = httpsUrl(download.finalUrl || selectedUrl, selectedUrl);
-      if (!resolvedUrl) {
-        throw new MediaProviderError(`${provider} media redirected to an insecure or invalid URL.`, {
-          code: 'INVALID_URL',
+      const selectedUrl = dependencies.choose(remaining);
+      if (!selectedUrl) {
+        throw new MediaProviderError(`${provider} feed did not contain a usable direct image.`, {
+          code: 'INVALID_RESPONSE',
         });
       }
-      return {
-        page,
-        url: resolvedUrl.toString(),
-        download,
-      };
+      attempted.add(selectedUrl);
+      return { page, ...(await downloadCosplayImage(context, feed, selectedUrl)) };
     } catch (error) {
       lastError = error;
-      if (pool && selectedUrl && hostIsFailing(error)) await pool.reportDeadHost(selectedUrl);
       if (STOP_CODES.has(error?.code)) break;
       context.logger?.debug('Rejected a cosplay image; trying another.', {
         provider,
-        origin,
         page,
         attempt: attempt + 1,
         code: error?.code,

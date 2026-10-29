@@ -2,7 +2,6 @@ import { handleInteractionRequest } from './http/interactions.js';
 import { runtimeFor } from './runtime.js';
 import { runScheduled } from './scheduled.js';
 
-export { CosplayPool } from './durable/cosplay-pool.js';
 export { DiscordGateway } from './durable/discord-gateway.js';
 export { UserQuota } from './durable/user-quota.js';
 

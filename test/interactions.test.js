@@ -12,6 +12,7 @@ import {
   componentInteraction,
   modalInteraction,
   signedRequest,
+  snowflake,
   testUser,
 } from './helpers/discord.js';
 
@@ -39,6 +40,16 @@ async function lastEdit() {
     return { payload: JSON.parse(form.get('payload_json')), file: form.get('files[0]'), multipart: true };
   }
   return { payload: await request.json(), multipart: false };
+}
+
+// An interaction Discord created `ageMs` ago, which narrows the window for an
+// inline reply just as a slow delivery does.
+function createdAgo(interaction, ageMs) {
+  return { ...interaction, id: snowflake(Date.now() - ageMs) };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function quotaSnapshot(userId = USER_ID) {
@@ -105,33 +116,57 @@ describe('media commands', () => {
 
   it('trusts threads, which inherit age restriction from their parent channel', async () => {
     mock.route('GET https://nekobot.xyz/api/image?type=4k', () => json({ success: true, message: 'https://i0.nekobot.xyz/t.jpg' }));
-    discordWebhookRoute();
     const thread = { id: '444444444444444445', type: 11, parent_id: '444444444444444444' };
-    expect(await send(commandInteraction('4k', { channel: thread, userId: '555555555555555550' }))).toEqual({ type: 5 });
+    const allowed = await send(commandInteraction('4k', { channel: thread, userId: '555555555555555550' }));
+    expect(allowed.type).toBe(4);
+    expect(allowed.data.embeds[0].image.url).toBe('https://i0.nekobot.xyz/t.jpg');
     const refused = await send(commandInteraction('4k', { channel: { ...thread, nsfw: false }, userId: '555555555555555550' }));
     expect(refused.data.embeds[0].title).toContain('Not an age-restricted channel');
   });
 
-  it('defers, then edits the original response with a URL embed and buttons', async () => {
+  it('replies at once with a URL embed and buttons when the provider is quick', async () => {
     mock.route('GET https://nekobot.xyz/api/image?type=4k', (request) => {
       expect(request.headers.get('authorization')).toBe('test-nekobot-authorization');
       return json({ success: true, message: 'https://i0.nekobot.xyz/a/b/c.jpg' });
     });
-    discordWebhookRoute();
 
     const body = await send(commandInteraction('4k', { guild: false, userId: '555555555555555551' }));
-    expect(body).toEqual({ type: 5 });
-
-    const { payload, multipart } = await lastEdit();
-    expect(multipart).toBe(false);
-    expect(payload.embeds[0].image.url).toBe('https://i0.nekobot.xyz/a/b/c.jpg');
-    expect(payload.embeds[0].footer.text).toBe('Test User');
-    expect(payload.attachments).toEqual([]);
-    const [refresh, link] = payload.components[0].components;
+    expect(body.type).toBe(4);
+    expect(body.data.embeds[0].image.url).toBe('https://i0.nekobot.xyz/a/b/c.jpg');
+    expect(body.data.embeds[0].footer.text).toBe('Test User');
+    expect(body.data.attachments).toEqual([]);
+    const [refresh, link] = body.data.components[0].components;
     expect(refresh.custom_id).toBe('m:4k');
     expect(link).toMatchObject({ style: 5, url: 'https://i0.nekobot.xyz/a/b/c.jpg' });
-    expect(mock.callsTo(WEBHOOK_PREFIX)[0].headers.authorization).toBeUndefined();
+    expect(mock.callsTo(WEBHOOK_PREFIX)).toHaveLength(0);
     expect((await quotaSnapshot('555555555555555551')).dailyUsed).toBe(1);
+  });
+
+  it('acknowledges first and edits the result in when the provider is slow', async () => {
+    mock.route('GET https://nekobot.xyz/api/image?type=4k', async () => {
+      await delay(700);
+      return json({ success: true, message: 'https://i0.nekobot.xyz/slow.jpg' });
+    });
+    discordWebhookRoute();
+
+    // Created two seconds ago, so the inline window closes before the answer.
+    const interaction = createdAgo(commandInteraction('4k', { userId: '555555555555555549' }), 2_000);
+    expect(await send(interaction)).toEqual({ type: 5 });
+    const { payload, multipart } = await lastEdit();
+    expect(multipart).toBe(false);
+    expect(payload.embeds[0].image.url).toBe('https://i0.nekobot.xyz/slow.jpg');
+    expect(mock.callsTo(WEBHOOK_PREFIX)[0].headers.authorization).toBeUndefined();
+    // The request already under way is delivered, not repeated.
+    expect(mock.callsTo('GET https://nekobot.xyz/')).toHaveLength(1);
+    expect((await quotaSnapshot('555555555555555549')).dailyUsed).toBe(1);
+  });
+
+  it('defers a refresh at once when Discord delivers it too late to answer inline', async () => {
+    mock.route('GET https://api.purrbot.site/v2/img/nsfw/cum/gif', () => json({ link: 'https://cdn.purrbot.site/nsfw/cum/gif/cum_002.gif', error: false }));
+    discordWebhookRoute();
+    const interaction = createdAgo(componentInteraction('m:cum', { userId: '555555555555555548' }), 2_500);
+    expect(await send(interaction)).toEqual({ type: 6 });
+    expect((await lastEdit()).payload.embeds[0].image.url).toBe('https://cdn.purrbot.site/nsfw/cum/gif/cum_002.gif');
   });
 
   it('re-uploads downloaded media as a native attachment', async () => {
@@ -157,51 +192,89 @@ describe('media commands', () => {
     expect(payload.components[0].components[1].url).toBe('https://data.n-sfw.com/nsfw/breeding/abc.jpg');
   });
 
-  it('falls back to another source when one provider fails', async () => {
-    mock.route('GET https://api.n-sfw.com/nsfw/ecchi', () => new Response('bad gateway', { status: 502 }));
-    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/images?IncludedTags=ecchi&IsNsfw=True', (request) => {
-      expect(request.headers.get('authorization')).toBeNull();
-      return json({ items: [{ id: 1, url: 'https://waifu-im-shim.trinitymoin.workers.dev/1.jpg', is_nsfw: true }] });
+  it('acknowledges as soon as a file download starts', async () => {
+    let release;
+    const released = new Promise((resolve) => {
+      release = resolve;
     });
-    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/1.jpg', () => image('image/jpeg'));
+    mock.route('GET https://api.n-sfw.com/nsfw/breeding', () => json({ mime: 'image/jpeg', size: 2_048, url: 'https://data.n-sfw.com/nsfw/breeding/held.jpg' }));
+    mock.route('GET https://data.n-sfw.com/nsfw/breeding/held.jpg', async () => {
+      await released;
+      return image('image/jpeg');
+    });
     discordWebhookRoute();
-    await send(commandInteraction('ecchi', { userId: '555555555555555558' }));
+
+    const request = await signedRequest(commandInteraction('breeding', { userId: '555555555555555546' }));
+    const ctx = createExecutionContext();
+    const startedAt = Date.now();
+    const response = await worker.fetch(request, env, ctx);
+    expect(await response.json()).toEqual({ type: 5 });
+    // Well before the inline window would have closed.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(mock.callsTo(WEBHOOK_PREFIX)).toHaveLength(0);
+
+    release();
+    await waitOnExecutionContext(ctx);
     const { payload, multipart } = await lastEdit();
     expect(multipart).toBe(true);
     expect(payload.embeds[0].image.url).toBe('attachment://media.jpg');
-    expect(payload.components[0].components[1].url).toBe('https://waifu-im-shim.trinitymoin.workers.dev/1.jpg');
+    expect((await quotaSnapshot('555555555555555546')).dailyUsed).toBe(1);
+  });
+
+  it('falls back to another source when one provider fails', async () => {
+    mock.route('GET https://api.n-sfw.com/nsfw/ecchi', () => new Response('bad gateway', { status: 502 }));
+    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/', (request) => {
+      expect(request.headers.get('authorization')).toBeNull();
+      return image('image/jpeg');
+    });
+    discordWebhookRoute();
+    expect(await send(commandInteraction('ecchi', { userId: '555555555555555558' }))).toEqual({ type: 5 });
+    const { payload, multipart } = await lastEdit();
+    expect(multipart).toBe(true);
+    expect(payload.embeds[0].image.url).toBe('attachment://media.jpg');
+    expect(payload.components[0].components[1].url).toMatch(/^https:\/\/waifu-im-shim\.trinitymoin\.workers\.dev\/\d+\.(?:gif|jpe?g|png|webp)$/);
+    // The archive image comes from the bundled index, without a search.
+    expect(mock.callsTo('GET https://waifu-im-shim.trinitymoin.workers.dev/images')).toHaveLength(0);
   });
 
   it('reports total failure without charging quota, then refreshes with the chosen style', async () => {
     mock.route('GET https://api.n-sfw.com/nsfw/feet', () => new Response('upstream down', { status: 503 }));
-    discordWebhookRoute();
 
-    expect(await send(commandInteraction('feet', { options: [{ name: 'style', type: 3, value: 'Anime' }], userId: '555555555555555553' }))).toEqual({ type: 5 });
-    const { payload } = await lastEdit();
-    expect(payload.embeds[0].title).toContain('Error');
-    expect(payload.embeds[0].description).toBe('No media source returned a usable result. Please try again.');
+    const failed = await send(commandInteraction('feet', { options: [{ name: 'style', type: 3, value: 'Anime' }], userId: '555555555555555553' }));
+    expect(failed.type).toBe(4);
+    expect(failed.data.embeds[0].title).toContain('Error');
+    expect(failed.data.embeds[0].description).toBe('No media source returned a usable result. Please try again.');
     expect((await quotaSnapshot('555555555555555553')).dailyUsed).toBe(0);
 
     mock.route('GET https://nekobot.xyz/api/image?type=feet', () => json({ success: true, message: 'https://i0.nekobot.xyz/feet.jpg' }));
-    await send(componentInteraction('m:feet:style=Real', { userId: '555555555555555553' }));
-    const refreshed = await lastEdit();
-    expect(refreshed.payload.embeds[0].image.url).toBe('https://i0.nekobot.xyz/feet.jpg');
-    expect(refreshed.payload.components[0].components[0].custom_id).toBe('m:feet:style=Real');
+    const refreshed = await send(componentInteraction('m:feet:style=Real', { userId: '555555555555555553' }));
+    expect(refreshed.type).toBe(7);
+    expect(refreshed.data.embeds[0].image.url).toBe('https://i0.nekobot.xyz/feet.jpg');
+    expect(refreshed.data.components[0].components[0].custom_id).toBe('m:feet:style=Real');
+    expect(mock.callsTo(WEBHOOK_PREFIX)).toHaveLength(0);
+    expect((await quotaSnapshot('555555555555555553')).dailyUsed).toBe(1);
   });
 
-  it('acknowledges component refreshes with a deferred update', async () => {
+  it('updates the message in place when a refresh is ready quickly', async () => {
     mock.route('GET https://api.purrbot.site/v2/img/nsfw/cum/gif', () => json({ link: 'https://cdn.purrbot.site/nsfw/cum/gif/cum_001.gif', error: false }));
-    discordWebhookRoute();
-    expect(await send(componentInteraction('m:cum', { userId: '555555555555555554' }))).toEqual({ type: 6 });
-    expect((await lastEdit()).payload.embeds[0].image.url).toBe('https://cdn.purrbot.site/nsfw/cum/gif/cum_001.gif');
+    const body = await send(componentInteraction('m:cum', { userId: '555555555555555554' }));
+    expect(body.type).toBe(7);
+    expect(body.data.embeds[0].image.url).toBe('https://cdn.purrbot.site/nsfw/cum/gif/cum_001.gif');
   });
 
   it('still routes refresh buttons created by the archived bot', async () => {
     mock.route('GET https://nekobot.xyz/api/image?type=anal', () => json({ success: true, message: 'https://i0.nekobot.xyz/anal.jpg' }));
+    const body = await send(componentInteraction('refresh_anal_Real', { userId: '555555555555555555' }));
+    expect(body.type).toBe(7);
+    expect(body.data.components[0].components[0].custom_id).toBe('m:anal:style=Real');
+  });
+
+  it('never asks a provider that is switched off', async () => {
+    mock.route('GET https://waifu-im-shim.trinitymoin.workers.dev/', () => image('image/jpeg'));
     discordWebhookRoute();
-    expect(await send(componentInteraction('refresh_anal_Real', { userId: '555555555555555555' }))).toEqual({ type: 6 });
-    const { payload } = await lastEdit();
-    expect(payload.components[0].components[0].custom_id).toBe('m:anal:style=Real');
+    expect(await send(commandInteraction('waifu', { userId: '555555555555555547' }))).toEqual({ type: 5 });
+    expect((await lastEdit()).payload.embeds[0].image.url).toBe('attachment://media.jpg');
+    expect(mock.callsTo('GET https://api.waifu.pics/')).toHaveLength(0);
   });
 
   it('enforces the free minute quota before contacting any provider', async () => {
@@ -225,8 +298,9 @@ describe('media commands', () => {
       await stub.commitMedia({ userId: PREMIUM_USER_ID, reservationId, premium: true });
     }
     mock.route('GET https://nekobot.xyz/api/image?type=4k', () => json({ success: true, message: 'https://i0.nekobot.xyz/4k.jpg' }));
-    discordWebhookRoute();
-    expect(await send(commandInteraction('4k', { userId: PREMIUM_USER_ID }))).toEqual({ type: 5 });
+    const body = await send(commandInteraction('4k', { userId: PREMIUM_USER_ID }));
+    expect(body.type).toBe(4);
+    expect(body.data.embeds[0].image.url).toBe('https://i0.nekobot.xyz/4k.jpg');
     expect((await quotaSnapshot(PREMIUM_USER_ID)).dailyUsed).toBe(62);
   });
 
@@ -236,11 +310,11 @@ describe('media commands', () => {
       size: 300_000,
       url: 'https://data.n-sfw.com/nsfw/cages/big.jpg',
     }));
-    discordWebhookRoute();
-    await send(commandInteraction('cages', { attachmentSizeLimit: 200_000, userId: '555555555555555557' }));
-    const { payload } = await lastEdit();
-    expect(payload.embeds[0].title).toContain('Error');
+    const body = await send(commandInteraction('cages', { attachmentSizeLimit: 200_000, userId: '555555555555555557' }));
+    expect(body.type).toBe(4);
+    expect(body.data.embeds[0].title).toContain('Error');
     expect(mock.callsTo('GET https://data.n-sfw.com/')).toHaveLength(0);
+    expect((await quotaSnapshot('555555555555555557')).dailyUsed).toBe(0);
   });
 });
 
@@ -268,28 +342,39 @@ describe('utility commands', () => {
     expect(body.data.embeds[0].title).toContain('Core Features');
   });
 
+  it('answers /ping at once with live latency figures', async () => {
+    mock.route('GET https://discord.com/api/v10/applications/@me', () => json({ id: APPLICATION_ID, approximate_guild_count: 3 }));
+    const body = await send(commandInteraction('ping', { userId: '666666666666666665' }));
+    expect(body.type).toBe(4);
+    expect(body.data.embeds[0].title).toContain('Latency Overview');
+    expect(body.data.embeds[0].fields[1].value).toMatch(/^`\d+ms`$/);
+    expect(body.data.components[0].components[0].custom_id).toBe('ping:page:2');
+
+    const specs = await send(componentInteraction('ping:page:2', { userId: '666666666666666665' }));
+    expect(specs.type).toBe(7);
+    expect(specs.data.embeds[0].fields.find((field) => field.name.includes('Guild Count')).value).toBe('`3`');
+    expect(mock.callsTo(WEBHOOK_PREFIX)).toHaveLength(0);
+  });
+
   it('reports Premium status and live usage for another user', async () => {
     const target = testUser(PREMIUM_USER_ID);
-    discordWebhookRoute();
     const body = await send(commandInteraction('premium', {
       userId: '666666666666666663',
       options: [{ name: 'user', type: 6, value: PREMIUM_USER_ID }],
       resolved: { users: { [PREMIUM_USER_ID]: target } },
     }));
-    expect(body).toEqual({ type: 5 });
-    const { payload } = await lastEdit();
-    expect(payload.embeds[0].title).toBe('Premium Plan ($1)');
-    expect(payload.embeds[0].description).toContain('Unlimited per min');
-    expect(payload.components[0].components[1].custom_id).toBe(`premium:refresh:${PREMIUM_USER_ID}:666666666666666663`);
+    expect(body.type).toBe(4);
+    expect(body.data.embeds[0].title).toBe('Premium Plan ($1)');
+    expect(body.data.embeds[0].description).toContain('Unlimited per min');
+    expect(body.data.components[0].components[1].custom_id).toBe(`premium:refresh:${PREMIUM_USER_ID}:666666666666666663`);
+    expect(mock.callsTo(WEBHOOK_PREFIX)).toHaveLength(0);
   });
 
   it('refreshes Premium usage in place', async () => {
-    discordWebhookRoute();
     const viewer = '666666666666666664';
     const body = await send(componentInteraction(`premium:refresh:${viewer}:${viewer}`, { userId: viewer }));
-    expect(body).toEqual({ type: 6 });
-    const { payload } = await lastEdit();
-    expect(payload.embeds[0].title).toBe('Free Plan ($0)');
-    expect(payload.embeds[0].description).toContain('60 / 60 per min');
+    expect(body.type).toBe(7);
+    expect(body.data.embeds[0].title).toBe('Free Plan ($0)');
+    expect(body.data.embeds[0].description).toContain('60 / 60 per min');
   });
 });
