@@ -2,7 +2,8 @@ import { api } from './api.js';
 import { clear, h, reducedMotion } from './dom.js';
 import { icon } from './icons.js';
 import { mark } from './mark.js';
-import { day, RANGE_LABELS, RANGED_SORTS, results, SORT_LABELS, TEXT } from './text.js';
+import { banner, imageWatch, listOutcome, noticeElement, problem, searchable, whenOnline } from './notices.js';
+import { day, NOTICE, RANGE_LABELS, RANGED_SORTS, results, SORT_LABELS, TEXT } from './text.js';
 
 // Cover widths per layout: two columns on phones up to five on wide
 // screens. The browser picks the 305-pixel copy or the full image from it.
@@ -11,6 +12,17 @@ const COVER_SIZES = '(min-width: 1280px) 248px, (min-width: 960px) 24vw, (min-wi
 const LOOKAHEAD = 1600;
 const SKELETONS = 8;
 const MAXIMUM_QUERY = 80;
+// Covers that fail, with none loading, before the feed says the image server
+// is refusing them.
+const COVERS_DOWN = 6;
+// A list the site sends a few albums at a time loads its pages this far
+// apart, rather than in one burst.
+const LIMITED_PACE = 350;
+// Pages in a row that add nothing new before the list stops (a site that
+// repeats a page would otherwise be read forever). Lists the site sends a
+// few albums at a time repeat albums between new ones, so they get longer.
+const STALE_PAGES = 2;
+const LIMITED_STALE_PAGES = 6;
 
 export function readFeedState(search) {
   const params = new URLSearchParams(search);
@@ -34,7 +46,7 @@ export function feedPath(state) {
 
 export const sameFeed = (a, b) => a.q === b.q && a.sort === b.sort && a.range === b.range;
 
-function cover(item) {
+function cover(item, watch) {
   const frame = h('div', { class: 'cover sq' });
   const fail = () => {
     frame.classList.add('failed');
@@ -51,11 +63,26 @@ function cover(item) {
       referrerpolicy: 'no-referrer',
       draggable: 'false',
     });
-    image.addEventListener('load', () => frame.classList.add('loaded'), { once: true });
+    image.addEventListener('load', () => {
+      frame.classList.add('loaded');
+      watch?.loaded();
+    }, { once: true });
+    // One size can fail where the other works (the site resizes covers on a
+    // separate service), so a cover tries the other size once.
+    let other = true;
     image.addEventListener('error', () => {
+      if (other) {
+        other = false;
+        const next = image.currentSrc === item.cover.small ? item.cover.large : item.cover.small;
+        image.removeAttribute('srcset');
+        image.removeAttribute('sizes');
+        image.src = next;
+        return;
+      }
       image.remove();
       fail();
-    }, { once: true });
+      watch?.failed();
+    });
     frame.append(image);
   } else {
     fail();
@@ -75,15 +102,16 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
   const grid = h('ul', { class: 'grid' });
   const status = h('div', { class: 'feed-status', 'aria-live': 'polite' });
   const sentinel = h('div', { class: 'sentinel', 'aria-hidden': 'true' });
-  const element = h('div', { class: 'feed' }, h('header', { class: 'bar feed-bar' }, barRow, filters), h('main', { class: 'feed-main' }, grid, status, sentinel));
+  const notes = banner();
+  const element = h('div', { class: 'feed' }, h('header', { class: 'bar feed-bar' }, barRow, filters), h('main', { class: 'feed-main' }, notes.element, grid, status, sentinel));
 
   function prefetch(item) {
     (item.kind === 'video' ? api.video(item.slug) : api.album(item.slug)).catch(() => {});
   }
 
-  function card(item) {
+  function card(item, watch) {
     const link = h('a', { class: 'card', href: `/${item.kind}/${item.slug}` },
-      cover(item),
+      cover(item, watch),
       h('span', { class: 'card-title' }, item.title),
       item.date ? h('span', { class: 'card-date' }, day(item.date)) : null);
     link.addEventListener('click', (event) => {
@@ -155,7 +183,9 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
 
   function renderFilters() {
     if (state.q) {
-      const label = list?.total != null ? `“${state.q}” · ${results(list.total)}` : `“${state.q}”`;
+      // The site's count, only when it can be trusted.
+      const counted = list && !list.outcome && !list.limited && list.total != null;
+      const label = counted ? `“${state.q}” · ${results(list.total)}` : `“${state.q}”`;
       filters.replaceChildren(h('p', { class: 'filter-note' }, label));
       return;
     }
@@ -178,23 +208,38 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
     filters.replaceChildren(...chips);
   }
 
+  // Asks for the page that failed or came back unreadable once more.
+  function retry() {
+    list.error = null;
+    list.outcome = null;
+    list.more = true;
+    if (list.page === 0) showSkeletons();
+    load();
+  }
+
   function renderStatus() {
     if (!list) return;
     if (list.error) {
-      const retry = h('button', { class: 'btn btn-secondary btn-small sq', type: 'button' }, icon('retry', 18), TEXT.retry);
-      retry.addEventListener('click', () => {
-        list.error = false;
-        if (list.page === 0) showSkeletons();
-        load();
-      });
-      status.replaceChildren(h('div', { class: 'notice sq' }, h('p', {}, TEXT.loadError), retry));
+      status.replaceChildren(noticeElement(problem(list.error), retry));
     } else if (list.loading && list.page > 0) {
       status.replaceChildren(h('div', { class: 'loader', role: 'progressbar', 'aria-label': 'Loading' }, h('span', { class: 'sq' }), h('span', { class: 'sq' }), h('span', { class: 'sq' })));
+    } else if (list.outcome) {
+      status.replaceChildren(noticeElement(listOutcome(list.outcome, state), retry));
     } else if (!list.more) {
-      status.replaceChildren(h('p', { class: 'end' }, list.count === 0 ? (state.q ? TEXT.noResults : TEXT.empty) : TEXT.end));
+      // Stopping because the site kept repeating itself is not the end of
+      // the list, and the viewer says so.
+      status.replaceChildren(h('p', { class: 'end' }, list.repeating ? NOTICE.feed.repeating : state.q ? TEXT.endOfResults : TEXT.end));
     } else {
       status.replaceChildren();
     }
+  }
+
+  // Something that affects the whole list: covers the image server will not
+  // send, or a search the site sends a few albums at a time.
+  function renderBanner() {
+    if (list?.coversDown) notes.show(NOTICE.feed.coversDown);
+    else if (list?.limited) notes.show({ title: NOTICE.search.limited });
+    else notes.hide();
   }
 
   function showSkeletons() {
@@ -209,8 +254,16 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
   }
 
   async function load() {
-    if (!list || list.loading || !list.more || list.error) return;
+    if (!list || list.loading || !list.more || list.error || list.outcome) return;
     const current = list;
+    // The site matches only letters and numbers; say so without asking it.
+    if (state.q && !searchable(state.q)) {
+      clear(grid);
+      current.outcome = 'nothing';
+      current.more = false;
+      renderStatus();
+      return;
+    }
     current.loading = true;
     renderStatus();
     const page = current.page + 1;
@@ -220,37 +273,66 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
         : await api.feed({ sort: state.sort, range: state.range === 'all' ? null : state.range, page });
       if (current !== list) return;
       if (current.page === 0) clear(grid);
-      const fragment = document.createDocumentFragment();
-      for (const item of data.items) {
-        const key = `${item.kind}/${item.slug}`;
-        if (current.seen.has(key)) continue;
-        current.seen.add(key);
-        fragment.append(card(item));
-        current.count += 1;
+      // Answers cached from before lists had a state are read by their
+      // albums.
+      const outcome = data.state ?? (data.items?.length > 0 ? 'ok' : page > 1 ? 'end' : 'empty');
+      if (outcome === 'ok' || outcome === 'end') {
+        const fragment = document.createDocumentFragment();
+        const before = current.count;
+        for (const item of data.items) {
+          const key = `${item.kind}/${item.slug}`;
+          if (current.seen.has(key)) continue;
+          current.seen.add(key);
+          fragment.append(card(item, current.images));
+          current.count += 1;
+        }
+        grid.append(fragment);
+        current.page = page;
+        current.limited ||= Boolean(data.limited);
+        current.total = current.limited ? null : (data.total ?? current.total);
+        current.stale = data.items.length > 0 && current.count === before ? current.stale + 1 : 0;
+        current.repeating = current.stale >= (current.limited ? LIMITED_STALE_PAGES : STALE_PAGES);
+        current.more = outcome === 'ok' && Boolean(data.more) && data.items.length > 0 && !current.repeating;
+      } else {
+        // Empty, refused, missing, or unreadable: the same page is what a
+        // retry asks for, so the page count stays.
+        current.outcome = outcome;
+        current.more = false;
       }
-      grid.append(fragment);
-      current.page = page;
-      current.total = data.total ?? current.total;
-      current.more = Boolean(data.more) && data.items.length > 0;
-    } catch {
+    } catch (error) {
       if (current !== list) return;
       if (current.page === 0) clear(grid);
-      current.error = true;
+      current.error = error;
+      if (error.code === 'offline') {
+        whenOnline(() => {
+          if (list === current && current.error?.code === 'offline') retry();
+        });
+      }
     }
     current.loading = false;
     renderStatus();
+    renderBanner();
     if (state.q) renderFilters();
     // A tall screen may still show the end of the list.
-    if (current.more && !current.error && nearEnd()) requestAnimationFrame(load);
+    if (current.more && nearEnd()) {
+      if (current.limited) setTimeout(() => list === current && load(), LIMITED_PACE);
+      else requestAnimationFrame(load);
+    }
   }
 
   function apply(next, { silent = false } = {}) {
     state = { ...next };
     if (!state.q) browseState = { ...state };
     searching = Boolean(state.q);
-    list = { page: 0, more: true, loading: false, error: false, total: null, count: 0, seen: new Set() };
+    const fresh = { page: 0, more: true, loading: false, error: null, outcome: null, limited: false, coversDown: false, stale: 0, total: null, count: 0, seen: new Set() };
+    fresh.images = imageWatch((failing) => {
+      fresh.coversDown = failing;
+      if (list === fresh) renderBanner();
+    }, COVERS_DOWN);
+    list = fresh;
     renderBar();
     renderFilters();
+    renderBanner();
     showSkeletons();
     renderStatus();
     scrollTo({ top: 0 });

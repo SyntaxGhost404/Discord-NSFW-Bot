@@ -65,6 +65,8 @@ describe('parseListing', () => {
       ],
       more: true,
       total: 312831,
+      found: true,
+      entries: 2,
     });
     expect(JSON.stringify(result)).not.toContain('sidebar');
   });
@@ -86,9 +88,14 @@ describe('parseListing', () => {
     expect(result.items.map((entry) => entry.title)).toEqual(['From & alt', 'only a slug']);
   });
 
-  it('returns an empty list for a search without results', () => {
-    expect(parseListing(listingPage({ title: 'zzqq Search Results', main: false }))).toEqual({ items: [], more: false, total: null });
-    expect(parseListing('<html><body>Not a listing</body></html>')).toEqual({ items: [], more: false, total: null });
+  it('tells a search without results from a page it cannot read', () => {
+    expect(parseListing(listingPage({ title: 'zzqq Search Results', main: false }))).toEqual({ items: [], more: false, total: 0, found: true, entries: 0 });
+    expect(parseListing('<html><body>Not a listing</body></html>')).toEqual({ items: [], more: false, total: null, found: false, entries: 0 });
+  });
+
+  it('counts entries it could not read', () => {
+    const unknown = '<li><a href="/gallery/new-markup/"><img src="x"></a></li>';
+    expect(parseListing(listingPage({ count: 40, items: [unknown, unknown] }))).toMatchObject({ items: [], found: true, entries: 2, total: 40 });
   });
 });
 
@@ -114,9 +121,9 @@ describe('parseStory', () => {
     expect(parseStory(storyPage({ images: [`${FOLDER}5.png`, `${FOLDER}6.png`] }))).toEqual({ title: 'Album', base: FOLDER, files: ['5.png', '6.png'] });
   });
 
-  it('returns null without a story or without images', () => {
+  it('returns null without a story, and no files for a story without images', () => {
     expect(parseStory('<html><body><img src="x"></body></html>')).toBeNull();
-    expect(parseStory(storyPage({ images: ['https://ads.example/1.jpg'] }))).toBeNull();
+    expect(parseStory(storyPage({ images: ['https://ads.example/1.jpg'] }))).toEqual({ title: 'Album', base: null, files: [] });
   });
 });
 
@@ -132,9 +139,13 @@ describe('parseVideo', () => {
     expect(parseVideo(videoPage({ title: 'Clip &amp; more', poster: 'https://ads.example/p.jpg', stream, h1: false }))).toEqual({ title: 'Clip & more', poster: null, stream });
   });
 
-  it('returns null without a stream from the video host', () => {
-    expect(parseVideo(videoPage({ poster }))).toBeNull();
-    expect(parseVideo(videoPage({ poster, stream: 'https://ads.example/video.m3u8' }))).toBeNull();
-    expect(parseVideo(videoPage({ poster, stream: 'http://video16.videos-uploader.com/video/2026/1022/rLNoAx/video.m3u8' }))).toBeNull();
+  it('has no stream unless one comes from the video host', () => {
+    expect(parseVideo(videoPage({ poster }))).toEqual({ title: 'Clip', poster, stream: null });
+    expect(parseVideo(videoPage({ poster, stream: 'https://ads.example/video.m3u8' })).stream).toBeNull();
+    expect(parseVideo(videoPage({ poster, stream: 'http://video16.videos-uploader.com/video/2026/1022/rLNoAx/video.m3u8' })).stream).toBeNull();
+  });
+
+  it('returns null for a page without a player', () => {
+    expect(parseVideo('<html><body><h1 id="post_title">Gone</h1></body></html>')).toBeNull();
   });
 });

@@ -64,19 +64,21 @@ function coverFor(kind, source) {
 }
 
 // The page's main list. Each list on a page follows a title block; the
-// sidebar lists' titles link to "Read More", the main list's never do, and a
-// search without results has no main list at all.
+// sidebar lists' titles link to "Read More", the main list's never do. A
+// search without results has the title block but no list of its own. Null
+// means the page has no main list title at all.
 function mainList(html) {
   for (let at = html.indexOf(LIST_HEADING); at !== -1;) {
     const next = html.indexOf(LIST_HEADING, at + LIST_HEADING.length);
     const headingEnd = html.indexOf('</div>', at);
     const heading = html.slice(at, headingEnd === -1 ? at + 500 : headingEnd);
     if (!/<a\b/i.test(heading)) {
-      const start = html.indexOf(LIST_START, at);
-      if (start === -1 || (next !== -1 && start > next)) return null;
-      const end = html.indexOf('</ul>', start);
       const count = heading.match(/class="immoral_all_items">\s*([\d,]+)/);
-      return { html: html.slice(start, end === -1 ? undefined : end), total: count ? Number(count[1].replace(/,/g, '')) : null };
+      const total = count ? Number(count[1].replace(/,/g, '')) : null;
+      const start = html.indexOf(LIST_START, at);
+      if (start === -1 || (next !== -1 && start > next)) return { html: '', total };
+      const end = html.indexOf('</ul>', start);
+      return { html: html.slice(start, end === -1 ? undefined : end), total };
     }
     at = next;
   }
@@ -88,7 +90,8 @@ export function parseListing(html) {
   const list = mainList(text);
   const items = [];
   const seen = new Set();
-  for (const block of list ? list.html.split(/<li\b/).slice(1) : []) {
+  const blocks = list ? list.html.split(/<li\b/).slice(1) : [];
+  for (const block of blocks) {
     const link = block.match(/<a\s[^>]*href="\/(image|video)\/([a-z0-9_-]{1,320})\/"/);
     if (!link) continue;
     const kind = link[1] === 'video' ? 'video' : 'album';
@@ -105,12 +108,16 @@ export function parseListing(html) {
       cover: coverFor(kind, attribute(image, 'src')),
     });
   }
-  return { items, more: /<link rel="next" href="/.test(text), total: list?.total ?? null };
+  // `found` says whether the page had a main list at all, and `entries`
+  // how many entries it held, read or not: together they tell an empty
+  // list from a page the parser no longer understands.
+  return { items, more: /<link rel="next" href="/.test(text), total: list?.total ?? null, found: Boolean(list), entries: blocks.length };
 }
 
 // An album's story view: its title on <amp-story>, then one <amp-img> per
 // image in order, starting with the cover. Images from other albums are left
-// out by keeping only those under the cover's folder.
+// out by keeping only those under the cover's folder. Null means the page is
+// not a story view; a story without images has no files.
 export function parseStory(html) {
   const text = String(html);
   const storyStart = text.indexOf('<amp-story ');
@@ -130,16 +137,19 @@ export function parseStory(html) {
     seen.add(parts[2]);
     files.push(parts[2]);
   }
-  if (!base || files.length === 0) return null;
-  return { title: cleanText(attribute(story, 'title')), base, files };
+  return { title: cleanText(attribute(story, 'title')), base: files.length > 0 ? base : null, files };
 }
 
+// A video page: its title, poster, and HLS stream. Null means the page has
+// no video player; a player without a stream the viewer recognizes has a
+// null stream.
 export function parseVideo(html) {
   const text = String(html);
+  const player = text.match(/<video\b[^>]*>/)?.[0] ?? null;
   const sources = text.match(/<source\b[^>]*>/g) ?? [];
-  const stream = sources.map((tag) => attribute(tag, 'src')).find((src) => src && VIDEO_STREAM.test(src));
-  if (!stream) return null;
-  const poster = attribute(text.match(/<video\b[^>]*>/)?.[0] ?? '', 'poster');
+  if (!player && sources.length === 0) return null;
+  const stream = sources.map((tag) => attribute(tag, 'src')).find((src) => src && VIDEO_STREAM.test(src)) ?? null;
+  const poster = attribute(player ?? '', 'poster');
   const heading = text.match(/<h1 id="post_title">([\s\S]*?)<\/h1>/)?.[1]
     ?? text.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.replace(/\s+-\s+Hentai Cosplay\s*$/i, '');
   return {

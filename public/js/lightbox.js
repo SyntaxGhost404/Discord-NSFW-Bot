@@ -24,10 +24,32 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
   let current = clamp(index, 0, count - 1);
   const returnFocus = document.activeElement;
 
-  const makeSlide = () => {
+  // A photo that fails shows so, and loads again on a tap.
+  const makeImage = (slide) => {
     const image = h('img', { alt: '', decoding: 'async', draggable: 'false', referrerpolicy: 'no-referrer' });
-    return { element: h('div', { class: 'lb-slide' }, image), image, index: -1 };
+    image.addEventListener('load', () => slide.element.classList.remove('failed'));
+    image.addEventListener('error', () => {
+      if (image.getAttribute('src')) slide.element.classList.add('failed');
+    });
+    return image;
   };
+  const makeSlide = () => {
+    const slide = { index: -1 };
+    slide.image = makeImage(slide);
+    slide.element = h('div', { class: 'lb-slide' },
+      slide.image,
+      h('div', { class: 'lb-failed' }, icon('missing', 32), h('p', { class: 'notice-title' }, TEXT.photoMissing), h('p', { class: 'notice-hint' }, TEXT.tapToRetry)));
+    return slide;
+  };
+
+  function reload(slide) {
+    const source = slide.image.getAttribute('src');
+    const fresh = makeImage(slide);
+    slide.image.replaceWith(fresh);
+    slide.image = fresh;
+    slide.element.classList.remove('failed');
+    if (source) fresh.src = source;
+  }
   const slides = [makeSlide(), makeSlide(), makeSlide()];
   const track = h('div', { class: 'lb-track' }, slides.map((slide) => slide.element));
   const stage = h('div', { class: 'lb-stage' }, track);
@@ -97,11 +119,15 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
     if (position < 0 || position >= count) {
       slide.image.removeAttribute('src');
       slide.element.classList.add('empty');
+      slide.element.classList.remove('failed');
       return;
     }
     slide.element.classList.remove('empty');
     const source = `${base}${files[position]}`;
-    if (slide.image.getAttribute('src') !== source) slide.image.src = source;
+    if (slide.image.getAttribute('src') !== source) {
+      slide.element.classList.remove('failed');
+      slide.image.src = source;
+    }
   }
 
   function show(position) {
@@ -270,6 +296,10 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
   stage.addEventListener('pointercancel', finish);
 
   function tap(x, y) {
+    if (centerSlide().element.classList.contains('failed')) {
+      reload(centerSlide());
+      return;
+    }
     const now = performance.now();
     if (lastTap && now - lastTap.time < DOUBLE_TAP_MS && Math.hypot(x - lastTap.x, y - lastTap.y) < 30) {
       clearTimeout(tapTimer);

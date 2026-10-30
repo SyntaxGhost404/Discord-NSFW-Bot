@@ -68,8 +68,47 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
   10 ms CPU limit.
 - Lists are cached for 2 minutes and albums and videos for a day: the Worker
   asks Cloudflare's cache to keep the site's pages where edge caching applies,
-  and browsers reuse the answers for the same time. The app also keeps
-  answers in memory while it is open.
+  and browsers reuse the answers for the same time. A page the site says it
+  does not have is kept for a minute, and errors are never cached, so a
+  passing problem on the site does not stick. The app also keeps answers in
+  memory while it is open, except ones that may soon change.
+
+## When things go wrong
+
+The viewer says what actually happened, as far as it can tell, instead of
+one catch-all message, and offers Try again only where that can help.
+
+- **Searches.** "The site found no albums" when the site answered with an
+  empty results page, with a hint that fits what was typed (one letter, a
+  symbol, several words). "The site didn't return a results page" when the
+  site answered "not found", as it does for some searches; the site gives no
+  reason, so the viewer does not guess one, and it does not reword searches
+  to get around it. Searches with no letters or numbers are explained without
+  asking the site.
+- **Searches the site limits.** For some searches the site sends a couple of
+  albums per page while claiming thousands of results, a total that changes
+  from page to page. The viewer says the results fill in slowly, hides the
+  unreliable count, spaces out its requests, and keeps reading past the
+  albums the site repeats.
+- **Sorts and rankings.** An empty ranking says which range is empty ("Nothing
+  ranked today yet"). A list that keeps repeating itself stops, and says why.
+- **Failures.** Offline, a site that is slow, down, or turning requests
+  away, and the viewer being over its own request limit are each named. A
+  list that failed offline loads again by itself once the browser is back
+  online.
+- **Albums and videos.** A removed album or video says so, with no Try
+  again. An album without photos and a video page without a stream say so
+  too, and a stream that fails while playing can be loaded again.
+- **Images.** A photo that fails to load says so and loads again on a tap,
+  in the album and in the photo viewer. If several fail and none loads, a
+  note says the site's image server is refusing them. A cover tries the
+  other size before giving up.
+- **Pages the viewer cannot read.** When the site sends a page the parser
+  does not understand, the viewer says so and logs it to the Worker's logs
+  (`Unreadable list page`, `Unreadable page`), the sign that `src/parse.js`
+  needs an update.
+- **The age gate** says the answer is saved only when the browser can save
+  it.
 
 ## Deploy
 

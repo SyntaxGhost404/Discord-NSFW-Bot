@@ -20,6 +20,18 @@ function remember() {
   }
 }
 
+// Whether this browser will keep the answer, so the gate never promises
+// what it cannot do.
+function canRemember() {
+  try {
+    localStorage.setItem(`${KEY}:check`, '1');
+    localStorage.removeItem(`${KEY}:check`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // The app shows and fetches nothing until the visitor confirms their age.
 // The answer is kept on the device, so returning visitors go straight in.
 export function ageGate(root, enter) {
@@ -35,7 +47,7 @@ export function ageGate(root, enter) {
       h('h1', { id: 'gate-title', class: 'gate-title' }, TEXT.gateTitle),
       h('p', { id: 'gate-body', class: 'gate-body' }, TEXT.gateBody),
       h('div', { class: 'gate-actions' }, confirm, leave),
-      h('p', { class: 'gate-note' }, TEXT.gateNote)));
+      h('p', { class: 'gate-note' }, canRemember() ? TEXT.gateNote : TEXT.gateUnsaved)));
   confirm.addEventListener('click', () => {
     remember();
     gate.remove();

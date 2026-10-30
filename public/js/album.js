@@ -1,10 +1,14 @@
 import { api } from './api.js';
 import { clear, edgeSwipe, h } from './dom.js';
 import { icon } from './icons.js';
-import { day, photos, TEXT } from './text.js';
+import { banner, imageWatch, noticeElement, problem, whenOnline } from './notices.js';
+import { day, NOTICE, photos, TEXT } from './text.js';
 
 // Images fetched before the user scrolls; the rest load as they come near.
 const EAGER_PHOTOS = 2;
+// Photos that fail, with none loading, before the album says the image
+// server is refusing them.
+const PHOTOS_DOWN = 3;
 
 function header(summary, onBack) {
   const back = h('button', { class: 'icon-btn sq', type: 'button', 'aria-label': TEXT.back }, icon('back'));
@@ -18,9 +22,11 @@ function header(summary, onBack) {
 // continuous list (the source site splits large albums into pages).
 export function createAlbumView({ slug, summary, onBack, onOpenPhoto }) {
   const top = header(summary, onBack);
+  const notes = banner();
+  const watch = imageWatch((failing) => (failing ? notes.show(NOTICE.album.photosDown) : notes.hide()), PHOTOS_DOWN);
   const list = h('ol', { class: 'photos' });
   const status = h('div', { class: 'feed-status' });
-  const element = h('section', { class: 'detail', 'aria-labelledby': `album-${slug}` }, top.element, list, status);
+  const element = h('section', { class: 'detail', 'aria-labelledby': `album-${slug}` }, top.element, notes.element, list, status);
   top.title.id = `album-${slug}`;
   let album = null;
   edgeSwipe(element, onBack);
@@ -31,33 +37,55 @@ export function createAlbumView({ slug, summary, onBack, onOpenPhoto }) {
   }
 
   function photo(file, index) {
-    const frame = h('button', { class: 'photo sq', type: 'button', 'aria-label': `Photo ${index + 1} of ${album.files.length}` });
-    const image = h('img', {
-      src: `${album.base}${file}`,
-      alt: '',
-      decoding: 'async',
-      loading: index < EAGER_PHOTOS ? 'eager' : 'lazy',
-      fetchpriority: index === 0 ? 'high' : null,
-      referrerpolicy: 'no-referrer',
-      draggable: 'false',
+    const label = `Photo ${index + 1} of ${album.files.length}`;
+    const frame = h('button', { class: 'photo sq', type: 'button', 'aria-label': label });
+    const show = (eager) => {
+      const image = h('img', {
+        src: `${album.base}${file}`,
+        alt: '',
+        decoding: 'async',
+        loading: eager ? 'eager' : 'lazy',
+        fetchpriority: index === 0 ? 'high' : null,
+        referrerpolicy: 'no-referrer',
+        draggable: 'false',
+      });
+      image.addEventListener('load', () => {
+        if (image.naturalWidth && image.naturalHeight) frame.style.aspectRatio = `${image.naturalWidth} / ${image.naturalHeight}`;
+        frame.classList.add('loaded');
+        frame.setAttribute('aria-label', label);
+        watch.loaded();
+      }, { once: true });
+      image.addEventListener('error', () => {
+        image.remove();
+        frame.classList.add('failed');
+        frame.setAttribute('aria-label', `${label}. ${TEXT.photoMissing} ${TEXT.tapToRetry}`);
+        frame.append(icon('missing', 28), h('span', { class: 'photo-note' }, TEXT.photoMissing), h('span', { class: 'photo-hint' }, TEXT.tapToRetry));
+        watch.failed();
+      }, { once: true });
+      frame.append(image);
+    };
+    show(index < EAGER_PHOTOS);
+    frame.addEventListener('click', () => {
+      // A photo that failed loads again rather than opening an empty viewer.
+      if (frame.classList.contains('failed')) {
+        frame.classList.remove('failed');
+        clear(frame);
+        show(true);
+        return;
+      }
+      onOpenPhoto({ base: album.base, files: album.files, index });
     });
-    image.addEventListener('load', () => {
-      if (image.naturalWidth && image.naturalHeight) frame.style.aspectRatio = `${image.naturalWidth} / ${image.naturalHeight}`;
-      frame.classList.add('loaded');
-    }, { once: true });
-    image.addEventListener('error', () => {
-      image.remove();
-      frame.classList.add('failed');
-      frame.append(icon('missing', 28), h('span', { class: 'photo-note' }, TEXT.photoMissing));
-    }, { once: true });
-    frame.append(image);
-    frame.addEventListener('click', () => onOpenPhoto({ base: album.base, files: album.files, index }));
     return h('li', { class: 'photo-cell' }, frame);
   }
 
   function render() {
     top.title.textContent = album.title || summary?.title || '';
-    top.meta.textContent = [photos(album.files.length), summary?.date ? day(summary.date) : ''].filter(Boolean).join(' · ');
+    top.meta.textContent = [album.files.length > 0 ? photos(album.files.length) : '', summary?.date ? day(summary.date) : ''].filter(Boolean).join(' · ');
+    if (album.files.length === 0) {
+      clear(list);
+      status.replaceChildren(noticeElement({ ...NOTICE.album.empty, retry: false }));
+      return;
+    }
     const fragment = document.createDocumentFragment();
     album.files.forEach((file, index) => fragment.append(photo(file, index)));
     list.replaceChildren(fragment);
@@ -70,11 +98,10 @@ export function createAlbumView({ slug, summary, onBack, onOpenPhoto }) {
     try {
       album = await api.album(slug);
       render();
-    } catch {
+    } catch (error) {
       clear(list);
-      const retry = h('button', { class: 'btn btn-secondary btn-small sq', type: 'button' }, icon('retry', 18), TEXT.retry);
-      retry.addEventListener('click', load);
-      status.replaceChildren(h('div', { class: 'notice sq' }, h('p', {}, TEXT.albumError), retry));
+      status.replaceChildren(noticeElement(problem(error, 'album'), load));
+      if (error.code === 'offline') whenOnline(() => element.isConnected && load());
     }
   }
 

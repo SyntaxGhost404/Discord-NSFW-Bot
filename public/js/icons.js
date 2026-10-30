@@ -14,6 +14,7 @@ const STROKES = Object.freeze({
   photo: ['M5 5.5h14v13H5Z', 'm5 15.5 4-4 3 3 2.5-2.5 4.5 4.5', 'M15 9.25h.01'],
   missing: ['M5 5.5h14v13H5Z', 'M5 5.5l14 13'],
   up: ['M12 18.5V6', 'M6.5 11.5 12 6l5.5 5.5'],
+  info: ['M12 20.5a8.5 8.5 0 1 0 0-17a8.5 8.5 0 0 0 0 17Z', 'M12 11v5', 'M12 7.75h.01'],
 });
 
 const FILLS = Object.freeze({

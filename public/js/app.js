@@ -19,10 +19,16 @@ const root = document.getElementById('app');
 startSquircles(document.body);
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
+// Album and video names on the site are lowercase; a link typed or shared
+// with capitals still opens the album.
 function currentRoute() {
-  const match = location.pathname.match(/^\/(album|video)\/([a-z0-9_-]{1,320})\/?$/);
-  return match ? { kind: match[1], slug: match[2] } : { kind: 'feed', state: readFeedState(location.search) };
+  const match = location.pathname.match(/^\/(album|video)\/([a-z0-9_-]{1,320})\/?$/i);
+  return match ? { kind: match[1].toLowerCase(), slug: match[2].toLowerCase() } : { kind: 'feed', state: readFeedState(location.search) };
 }
+
+// The address a route is shown under, so the address bar never names a page
+// the app is not showing.
+const addressOf = (route) => (route.kind === 'feed' ? feedPath(route.state) : `/${route.kind}/${route.slug}`);
 
 function start() {
   let feed = null;
@@ -32,8 +38,9 @@ function start() {
   let afterPop = null;
   const depth = () => history.state?.depth ?? 0;
 
-  // A reload can leave an overlay marker on this entry; start clean.
-  history.replaceState({ depth: 0 }, '', location.href);
+  // A reload can leave an overlay marker on this entry; start clean, under
+  // the address of what is shown.
+  history.replaceState({ depth: 0 }, '', addressOf(currentRoute()));
 
   function onStateChange(state) {
     history.replaceState(history.state, '', feedPath(state));
