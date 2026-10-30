@@ -1,0 +1,17 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "cosplay-viewer",
+	"main": "src/worker.js",
+	"compatibility_date": "2026-10-12",
+	// The app is static files; only /api/* runs the Worker, which reads the
+	// source site and returns plain JSON. Unknown paths serve index.html.
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		"run_worker_first": ["/api/*"]
+	},
+	"observability": {
+		"enabled": true
+	}
+}

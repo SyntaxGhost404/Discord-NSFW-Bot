@@ -1,0 +1,23 @@
+{
+  "name": "cosplay-viewer",
+  "version": "1.0.0",
+  "description": "A fast, ad-free viewer for hentai-cosplay-xxx.com that runs on Cloudflare Workers.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "node scripts/check.mjs",
+    "test": "vitest run",
+    "validate": "npm run check && npm test"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.4",
+    "vitest": "5.0.5",
+    "wrangler": "4.151.1"
+  }
+}
