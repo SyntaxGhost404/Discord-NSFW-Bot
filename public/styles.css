@@ -627,6 +627,10 @@ img {
   transition: none;
 }
 
+.detail:focus-visible {
+  box-shadow: none;
+}
+
 .detail-bar .bar-row {
   gap: 12px;
 }

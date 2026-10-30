@@ -125,7 +125,14 @@ function start() {
     await settle(view.element, 450);
     if (detail?.view !== view) return;
     feed.element.inert = true;
-    view.focusTarget?.focus({ preventScroll: true });
+    // Opened from a card: focus Back, ready for the keyboard. Opened from a
+    // link or the history: focus the page itself, which shows no ring.
+    if (from) {
+      view.focusTarget?.focus({ preventScroll: true });
+    } else {
+      view.element.tabIndex = -1;
+      view.element.focus({ preventScroll: true });
+    }
   }
 
   async function closeDetail() {
