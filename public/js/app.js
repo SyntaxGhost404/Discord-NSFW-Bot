@@ -1,19 +1,21 @@
 import { createAlbumView } from './album.js';
 import { settle } from './dom.js';
-import { createFeed, feedPath, readFeedState, sameFeed } from './feed.js';
+import { createFeed, feedPath, homeState, readFeedState, sameFeed } from './feed.js';
 import { ageGate } from './gate.js';
 import { openLightbox } from './lightbox.js';
+import { openProviderSheet } from './providers.js';
 import { openSortSheet } from './sort.js';
 import { startSquircles } from './squircle.js';
 import { RANGED_SORTS } from './text.js';
 import { createVideoView } from './video.js';
 
 // Routes:
-//   /                      the feed (?sort=, &range=, or ?q= for a search)
+//   /                      the feed (?sort=, &range=, or ?q= for a search;
+//                          ?provider= for any provider but the default)
 //   /album/<slug>          an album, over the feed
 //   /video/<slug>          a video, over the feed
-// The sort sheet and the photo viewer are history entries too, so the back
-// button or gesture closes them first.
+// The sort and provider sheets and the photo viewer are history entries
+// too, so the back button or gesture closes them first.
 
 const root = document.getElementById('app');
 startSquircles(document.body);
@@ -86,7 +88,20 @@ function start() {
       current,
       requestClose: () => closeOverlay(),
       onPick: (sort) => closeOverlay(() => {
-        feed.apply({ q: '', sort, range: RANGED_SORTS.has(sort) ? feed.state.range : 'all' });
+        feed.apply({ ...feed.state, q: '', sort, range: RANGED_SORTS.has(sort) ? feed.state.range : 'all' });
+      }),
+    }));
+  }
+
+  // Switching providers starts at the new provider's first page, and
+  // replaces the address like a sort change does.
+  function onPickProvider(current) {
+    if (overlay) return;
+    openOverlay('provider', () => openProviderSheet({
+      current,
+      requestClose: () => closeOverlay(),
+      onPick: (provider) => closeOverlay(() => {
+        if (provider !== feed.state.provider) feed.apply(homeState(provider));
       }),
     }));
   }
@@ -108,7 +123,7 @@ function start() {
 
   function ensureFeed(state) {
     if (!feed) {
-      feed = createFeed({ initial: state, onOpen, onPickSort, onStateChange });
+      feed = createFeed({ initial: state, onOpen, onPickSort, onPickProvider, onStateChange });
       root.append(feed.element);
     } else if (!sameFeed(feed.state, state)) {
       feed.apply(state, { silent: true });

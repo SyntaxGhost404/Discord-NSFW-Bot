@@ -88,10 +88,6 @@ img {
   flex: none;
 }
 
-.spacer {
-  flex: 1;
-}
-
 .noscript {
   margin: 40px 24px;
   color: var(--text-2);
@@ -246,16 +242,72 @@ img {
   gap: 8px;
 }
 
+/* The provider's name, with the button that switches providers right
+   beside it. It takes all the room the bar's buttons leave. */
+.brand {
+  min-width: 0;
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+}
+
 .wordmark {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 4px 4px 0;
+  padding: 4px 0;
   border: 0;
   background: none;
   font-size: 20px;
   font-weight: 800;
   letter-spacing: -0.02em;
+}
+
+/* feed.js shrinks a long name to fit narrow screens; past its floor, the
+   name is cut short. */
+.wordmark-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A compact squircle with a chevron. The button is a full-size touch
+   target; only the face inside it shows, 6px from the name. Its clear right
+   edge reaches into the bar's gap, which leaves the name more room. */
+.switcher {
+  width: 40px;
+  height: 44px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  margin: 0 -4px 0 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-1);
+}
+
+.switcher-face {
+  width: 32px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  --r: 9px;
+}
+
+.switcher:active .switcher-face {
+  background: var(--surface-3);
+}
+
+.switcher:focus-visible {
+  box-shadow: none;
+}
+
+.switcher:focus-visible .switcher-face {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 .filters {
@@ -980,6 +1032,10 @@ img {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-3);
+}
+
+.option-group.unlabeled {
+  padding-top: 12px;
 }
 
 .option {

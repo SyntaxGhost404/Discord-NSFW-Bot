@@ -29,6 +29,18 @@ export function clear(element) {
 
 export const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// Sets an element's text to `max` pixels, or smaller if that is too wide
+// for its box, down to `min`; below that, its own overflow style (an
+// ellipsis) takes over. Text width grows in step with font size, so one
+// measurement finds the size.
+export function fitText(element, max, min) {
+  element.style.fontSize = `${max}px`;
+  const room = element.clientWidth;
+  const needed = element.scrollWidth;
+  if (room === 0 || needed <= room) return;
+  element.style.fontSize = `${Math.max(min, Math.floor(((max * room) / needed) * 4) / 4)}px`;
+}
+
 // Resolves after one of the element's own transitions ends (not a child's),
 // after `timeout` at the latest, or at once when motion is reduced.
 export function settle(element, timeout = 400) {

@@ -9,6 +9,11 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
 - **Age gate first.** A full-screen check asks visitors to confirm they are 18
   or older before anything is fetched or shown. The answer is kept on the
   device, so each browser asks once.
+- **Provider switcher.** The header shows the active provider's address with
+  a small chevron button right beside it. The button opens a sheet listing
+  the providers, built from the same parts as the sort sheet. Hentai Cosplay
+  is the default. The second entry, Placeholder, is there to try switching:
+  it has no source yet, so the viewer says so and requests nothing for it.
 - **Feed.** Covers, titles, and dates in a grid that keeps loading as you
   scroll, in any of the site's eleven orders: most recent, most popular, most
   downloaded, most liked, most bookmarked, recently popular, recent downloads,
@@ -26,9 +31,9 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
   (Safari on iPhone, iPad, and Mac, and Chrome on Android). Other browsers
   show the poster and a short note.
 - **Feels like an app.** The back button and back gesture close the photo
-  viewer, the sort sheet, and the album in that order, a swipe from the left
-  edge goes back, and every feed, search, album, and video has its own link.
-  It can be added to the home screen.
+  viewer, the sort and provider sheets, and the album in that order, a swipe
+  from the left edge goes back, and every feed, search, album, and video has
+  its own link. It can be added to the home screen.
 
 ## Privacy and safety
 
@@ -53,6 +58,10 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
 - `public/` is the app: plain HTML, CSS, and JavaScript modules with no build
   step. Workers static assets serve it at no cost, and any path that is not a
   file serves `index.html`, so links such as `/album/<slug>` work.
+- `public/js/providers.js` lists the providers. A feed's address names its
+  provider (`/?provider=placeholder`) unless it is the default one, so
+  existing links still work. Switching providers replaces the address, like
+  a sort change. Only Hentai Cosplay has a Worker behind it so far.
 - `src/worker.js` runs only for `/api/*` (`run_worker_first` in
   `wrangler.jsonc`):
   - `GET /api/feed?sort=<sort>&range=<day|week|month|year>&page=<n>`
@@ -109,6 +118,8 @@ one catch-all message, and offers Try again only where that can help.
   needs an update.
 - **The age gate** says the answer is saved only when the browser can save
   it.
+- **A provider without a source** says it isn't connected yet, without
+  search, sorts, or a Try again button, and nothing is requested for it.
 
 ## Deploy
 
@@ -158,7 +169,10 @@ no third-party hosts, and no secrets in files that would be committed.
   apart, white for primary actions, and one green accent for focus and
   selection. No shadows, glows, blur, or floating layers.
 - **Type and icons.** The system font, inline SVG icons drawn for this app,
-  and short labels.
+  and short labels. The provider's name in the header is 20px where it fits
+  and shrinks on narrow screens down to 15px; only below that is it cut
+  short. In Roboto, Android's font, `hentai-cosplay-xxx.com` fits whole on a
+  360px-wide phone at 15.5px.
 
 ## Limits
 

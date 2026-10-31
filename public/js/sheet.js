@@ -1,4 +1,5 @@
 import { h, settle } from './dom.js';
+import { icon } from './icons.js';
 
 // A bottom sheet: slides up over a dim backdrop and closes from the
 // backdrop, Escape, or a downward drag on its top area. `requestClose` is
@@ -59,4 +60,23 @@ export function openSheet({ label, body, requestClose }) {
       if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     },
   };
+}
+
+// A sheet of options in groups, with the current one checked: the sort and
+// provider pickers. `groups` is [{ label, options: [{ value, label }] }]; a
+// group without a label sits right under the title.
+export function openOptionSheet({ label, groups, current, onPick, requestClose }) {
+  const body = h('div', { class: 'sheet-body' }, groups.map((group) => h('div', { class: group.label ? 'option-group' : 'option-group unlabeled', role: 'group', 'aria-label': group.label ?? label },
+    group.label ? h('h3', { class: 'option-label' }, group.label) : null,
+    group.options.map((choice) => {
+      const selected = choice.value === current;
+      const option = h('button', { class: 'option sq', type: 'button', 'aria-pressed': String(selected) },
+        h('span', {}, choice.label),
+        selected ? icon('check', 20) : null);
+      option.addEventListener('click', () => onPick(choice.value));
+      return option;
+    }))));
+  const sheet = openSheet({ label, body, requestClose });
+  requestAnimationFrame(() => sheet.element.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true }));
+  return sheet;
 }

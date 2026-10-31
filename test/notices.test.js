@@ -48,6 +48,10 @@ describe('listOutcome', () => {
     expect(listOutcome('missing', { sort: 'likes' })).toEqual({ ...NOTICE.feed.missing, retry: true });
   });
 
+  it('says a provider without a source is not connected, with nothing to retry', () => {
+    expect(listOutcome('unconnected', { sort: 'recent' })).toEqual({ ...NOTICE.provider.unconnected, retry: false });
+  });
+
   it('offers to read a page again when it could not be read', () => {
     expect(listOutcome('unreadable', { q: 'frieren' })).toEqual({ ...NOTICE.errors.unreadable, retry: true });
     expect(listOutcome('unreadable')).toEqual({ ...NOTICE.errors.unreadable, retry: true });

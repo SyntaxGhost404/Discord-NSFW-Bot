@@ -25,7 +25,6 @@ export const RANGED_SORTS = new Set(['downloads', 'likes', 'bookmarks']);
 export const RANGE_LABELS = Object.freeze({ all: 'All time', day: 'Today', week: 'This week', month: 'This month', year: 'This year' });
 
 export const TEXT = Object.freeze({
-  app: 'Cosplay',
   gateTitle: 'Adults only',
   gateBody: 'This app shows sexual content. Enter only if you are 18 or older.',
   gateEnter: "I'm 18 or older",
@@ -36,6 +35,8 @@ export const TEXT = Object.freeze({
   cancel: 'Cancel',
   clear: 'Clear',
   sort: 'Sort',
+  provider: 'Provider',
+  switchProvider: 'Switch provider',
   back: 'Back',
   close: 'Close',
   toTop: 'Back to top',
@@ -92,6 +93,9 @@ export const NOTICE = Object.freeze({
     longerRange: 'Try a longer time range.',
     repeating: 'The site kept sending albums already shown, so the list stops here.',
     coversDown: { title: "Covers aren't loading from the site's image server.", hint: 'Try again later or on another network.' },
+  }),
+  provider: Object.freeze({
+    unconnected: { title: "This provider isn't connected yet.", hint: 'Switch providers with the button next to its name.' },
   }),
   album: Object.freeze({
     empty: { title: 'This album has no photos on the site.', hint: 'They may have been removed.' },

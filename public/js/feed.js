@@ -1,8 +1,9 @@
 import { api } from './api.js';
-import { clear, h, reducedMotion } from './dom.js';
+import { clear, fitText, h, reducedMotion } from './dom.js';
 import { icon } from './icons.js';
 import { mark } from './mark.js';
 import { banner, imageWatch, listOutcome, noticeElement, problem, searchable, whenOnline } from './notices.js';
+import { DEFAULT_PROVIDER, providerById, providerTitle } from './providers.js';
 import { day, NOTICE, RANGE_LABELS, RANGED_SORTS, results, SORT_LABELS, TEXT } from './text.js';
 
 // Cover widths per layout: two columns on phones up to five on wide
@@ -23,18 +24,29 @@ const LIMITED_PACE = 350;
 // few albums at a time repeat albums between new ones, so they get longer.
 const STALE_PAGES = 2;
 const LIMITED_STALE_PAGES = 6;
+// The provider's name in the header: this size where it fits, smaller on
+// narrow screens down to the floor, and cut short with an ellipsis below it.
+const TITLE_SIZE = 20;
+const TITLE_MIN = 15;
+
+// A provider's first page: its newest albums.
+export const homeState = (provider = DEFAULT_PROVIDER) => ({ provider, q: '', sort: 'recent', range: 'all' });
 
 export function readFeedState(search) {
   const params = new URLSearchParams(search);
+  const provider = providerById(params.get('provider'));
+  // A provider without a source has nothing to sort or search.
+  if (!provider.connected) return homeState(provider.id);
   const q = (params.get('q') ?? '').replace(/\s+/g, ' ').trim().slice(0, MAXIMUM_QUERY);
-  if (q) return { q, sort: 'recent', range: 'all' };
+  if (q) return { provider: provider.id, q, sort: 'recent', range: 'all' };
   const sort = Object.hasOwn(SORT_LABELS, params.get('sort') ?? '') ? params.get('sort') : 'recent';
   const range = RANGED_SORTS.has(sort) && Object.hasOwn(RANGE_LABELS, params.get('range') ?? '') ? params.get('range') : 'all';
-  return { q: '', sort, range };
+  return { provider: provider.id, q: '', sort, range };
 }
 
 export function feedPath(state) {
   const params = new URLSearchParams();
+  if (state.provider !== DEFAULT_PROVIDER) params.set('provider', state.provider);
   if (state.q) params.set('q', state.q);
   else {
     if (state.sort !== 'recent') params.set('sort', state.sort);
@@ -44,7 +56,7 @@ export function feedPath(state) {
   return query ? `/?${query}` : '/';
 }
 
-export const sameFeed = (a, b) => a.q === b.q && a.sort === b.sort && a.range === b.range;
+export const sameFeed = (a, b) => a.provider === b.provider && a.q === b.q && a.sort === b.sort && a.range === b.range;
 
 function cover(item, watch) {
   const frame = h('div', { class: 'cover sq' });
@@ -91,11 +103,12 @@ function cover(item, watch) {
   return frame;
 }
 
-export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
+export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStateChange }) {
   let state = { ...initial };
-  let browseState = state.q ? { q: '', sort: 'recent', range: 'all' } : { ...state };
+  let browseState = state.q ? homeState(state.provider) : { ...state };
   let searching = Boolean(state.q);
   let list = null;
+  const connected = () => providerById(state.provider).connected;
 
   const barRow = h('div', { class: 'bar-row' });
   const filters = h('div', { class: 'filters' });
@@ -104,6 +117,31 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
   const sentinel = h('div', { class: 'sentinel', 'aria-hidden': 'true' });
   const notes = banner();
   const element = h('div', { class: 'feed' }, h('header', { class: 'bar feed-bar' }, barRow, filters), h('main', { class: 'feed-main' }, notes.element, grid, status, sentinel));
+
+  // The header's controls are made once, so focus can come back to them
+  // when a sheet closes. A tap on the provider's name scrolls to the top;
+  // the chevron beside it switches providers.
+  const title = h('span', { class: 'wordmark-title', id: 'provider-title' });
+  const home = h('button', { class: 'wordmark', type: 'button', 'aria-label': TEXT.toTop }, mark(28), title);
+  home.addEventListener('click', () => scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' }));
+  const switcher = h('button', { class: 'switcher', type: 'button', 'aria-label': TEXT.switchProvider, 'aria-describedby': 'provider-title', 'aria-haspopup': 'dialog' },
+    h('span', { class: 'switcher-face sq' }, icon('down', 16)));
+  switcher.addEventListener('click', () => onPickProvider(state.provider));
+  const brand = h('div', { class: 'brand' }, home, switcher);
+  const searchButton = h('button', { class: 'icon-btn sq', type: 'button', 'aria-label': TEXT.search }, icon('search'));
+  searchButton.addEventListener('click', () => {
+    searching = true;
+    renderBar();
+    renderFilters();
+  });
+  const sortButton = h('button', { class: 'icon-btn sq', type: 'button', 'aria-label': TEXT.sort }, icon('sort'));
+  sortButton.addEventListener('click', () => onPickSort(state.sort));
+
+  const fitTitle = () => {
+    if (title.isConnected) fitText(title, TITLE_SIZE, TITLE_MIN);
+  };
+  // A wider or narrower screen leaves a different room for the name.
+  new ResizeObserver(fitTitle).observe(barRow);
 
   function prefetch(item) {
     (item.kind === 'video' ? api.video(item.slug) : api.album(item.slug)).catch(() => {});
@@ -159,7 +197,7 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
         event.preventDefault();
         const q = input.value.replace(/\s+/g, ' ').trim();
         input.blur();
-        if (q) apply({ q, sort: 'recent', range: 'all' });
+        if (q) apply({ ...homeState(state.provider), q });
         else closeSearch();
       });
       const close = h('button', { class: 'btn btn-secondary btn-small sq', type: 'button' }, TEXT.cancel);
@@ -168,20 +206,16 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
       if (!state.q) requestAnimationFrame(() => input.focus());
       return;
     }
-    const home = h('button', { class: 'wordmark', type: 'button', 'aria-label': TEXT.toTop }, mark(28), h('span', {}, TEXT.app));
-    home.addEventListener('click', () => scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' }));
-    const search = h('button', { class: 'icon-btn sq', type: 'button', 'aria-label': TEXT.search }, icon('search'));
-    search.addEventListener('click', () => {
-      searching = true;
-      renderBar();
-      renderFilters();
-    });
-    const sort = h('button', { class: 'icon-btn sq', type: 'button', 'aria-label': TEXT.sort }, icon('sort'));
-    sort.addEventListener('click', () => onPickSort(state.sort));
-    barRow.replaceChildren(home, h('span', { class: 'spacer' }), search, sort);
+    title.textContent = providerTitle(providerById(state.provider));
+    barRow.replaceChildren(brand, ...(connected() ? [searchButton, sortButton] : []));
+    fitTitle();
   }
 
   function renderFilters() {
+    if (!connected()) {
+      filters.replaceChildren();
+      return;
+    }
     if (state.q) {
       // The site's count, only when it can be trusted.
       const counted = list && !list.outcome && !list.limited && list.total != null;
@@ -256,6 +290,14 @@ export function createFeed({ initial, onOpen, onPickSort, onStateChange }) {
   async function load() {
     if (!list || list.loading || !list.more || list.error || list.outcome) return;
     const current = list;
+    // A provider with no source behind it: say so without asking anything.
+    if (!connected()) {
+      clear(grid);
+      current.outcome = 'unconnected';
+      current.more = false;
+      renderStatus();
+      return;
+    }
     // The site matches only letters and numbers; say so without asking it.
     if (state.q && !searchable(state.q)) {
       clear(grid);

@@ -30,9 +30,12 @@ function searchHint(query) {
 }
 
 // A list that came back without albums, in the context it was asked in:
-// { q } for a search, { sort, range } for a sort.
+// { q } for a search, { sort, range } for a sort. 'unconnected' is a list
+// the viewer never asked for, because its provider has no source yet.
 export function listOutcome(state, { q = '', sort = 'recent', range = 'all' } = {}) {
   if (state === 'unreadable') return { ...NOTICE.errors.unreadable, retry: true };
+  // A provider with no source behind it: nothing was asked, nothing to retry.
+  if (state === 'unconnected') return { ...NOTICE.provider.unconnected, retry: false };
   if (q) {
     if (state === 'nothing') return { ...NOTICE.search.nothing, retry: false };
     if (state === 'refused') return { title: NOTICE.search.refused(q), hint: words(q) > 1 ? NOTICE.search.fewerOrDifferent : NOTICE.search.different, retry: false };
