@@ -19,9 +19,11 @@ const CLOSE_SPEED = 0.6;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
-export function openLightbox({ base, files, index, requestClose, onChange }) {
-  const count = files.length;
-  let current = clamp(index, 0, count - 1);
+// `photos` is the album's own list of { src }; it can grow while the viewer
+// is open, as an album's later pages arrive.
+export function openLightbox({ photos, index, requestClose, onChange }) {
+  const count = () => photos.length;
+  let current = clamp(index, 0, count() - 1);
   const returnFocus = document.activeElement;
 
   // A photo that fails shows so, and loads again on a tap.
@@ -116,14 +118,14 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
     slide.index = position;
     slide.image.classList.remove('animate');
     slide.image.style.transform = '';
-    if (position < 0 || position >= count) {
+    if (position < 0 || position >= count()) {
       slide.image.removeAttribute('src');
       slide.element.classList.add('empty');
       slide.element.classList.remove('failed');
       return;
     }
     slide.element.classList.remove('empty');
-    const source = `${base}${files[position]}`;
+    const source = photos[position].src;
     if (slide.image.getAttribute('src') !== source) {
       slide.element.classList.remove('failed');
       slide.image.src = source;
@@ -138,9 +140,9 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
     zoom = { scale: 1, x: 0, y: 0 };
     applyZoom(false);
     setTrack(0, false);
-    counter.textContent = `${current + 1} / ${count}`;
+    counter.textContent = `${current + 1} / ${count()}`;
     previousButton.hidden = current === 0;
-    nextButton.hidden = current === count - 1;
+    nextButton.hidden = current === count() - 1;
     onChange?.(current);
   }
 
@@ -150,7 +152,7 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
   async function page(direction) {
     if (paging) return;
     const target = current + direction;
-    if (target < 0 || target >= count) {
+    if (target < 0 || target >= count()) {
       setTrack(0, true);
       return;
     }
@@ -232,7 +234,7 @@ export function openLightbox({ base, files, index, requestClose, onChange }) {
       root.classList.add('moving');
     }
     if (gesture.type === 'page') {
-      const atEdge = (dx > 0 && current === 0) || (dx < 0 && current === count - 1);
+      const atEdge = (dx > 0 && current === 0) || (dx < 0 && current === count() - 1);
       setTrack(atEdge ? dx * 0.3 : dx, false);
     } else if (gesture.type === 'dismiss') {
       const progress = Math.min(1, Math.abs(dy) / height());

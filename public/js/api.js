@@ -43,9 +43,11 @@ function request(path) {
   return answer;
 }
 
+// Lists and albums go to the provider's own routes (`provider.api`). Videos
+// come only from the default provider.
 export const api = {
-  feed: ({ sort, range, page }) => request(`/api/feed?${new URLSearchParams({ sort, page: String(page), ...(range ? { range } : {}) })}`),
-  search: ({ q, page }) => request(`/api/search?${new URLSearchParams({ q, page: String(page) })}`),
-  album: (slug) => request(`/api/album/${encodeURIComponent(slug)}`),
+  feed: ({ provider, sort, range, page }) => request(`${provider.api}/feed?${new URLSearchParams({ sort, page: String(page), ...(range ? { range } : {}) })}`),
+  search: ({ provider, q, page }) => request(`${provider.api}/search?${new URLSearchParams({ q, page: String(page) })}`),
+  album: (provider, slug, page = 1) => request(`${provider.api}/album/${encodeURIComponent(slug)}${page > 1 ? `?page=${page}` : ''}`),
   video: (slug) => request(`/api/video/${encodeURIComponent(slug)}`),
 };

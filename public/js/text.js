@@ -24,6 +24,25 @@ export const RANGED_SORTS = new Set(['downloads', 'likes', 'bookmarks']);
 
 export const RANGE_LABELS = Object.freeze({ all: 'All time', day: 'Today', week: 'This week', month: 'This month', year: 'This year' });
 
+// xHamster's photo section. Its Top lists rank single photos, over the last
+// 7 or 30 days or all time; each card opens the photo's gallery.
+export const XH_SORT_LABELS = Object.freeze({
+  best: 'Best',
+  newest: 'Newest',
+  rated: 'Top rated',
+  viewed: 'Most viewed',
+  commented: 'Most commented',
+});
+
+export const XH_SORT_GROUPS = Object.freeze([
+  { label: 'Galleries', sorts: ['best', 'newest'] },
+  { label: 'Top photos', sorts: ['rated', 'viewed', 'commented'] },
+]);
+
+export const XH_RANGED_SORTS = new Set(['rated', 'viewed', 'commented']);
+
+export const XH_RANGE_LABELS = Object.freeze({ all: 'All time', week: '7 days', month: '30 days' });
+
 export const TEXT = Object.freeze({
   gateTitle: 'Adults only',
   gateBody: 'This app shows sexual content. Enter only if you are 18 or older.',
@@ -94,9 +113,6 @@ export const NOTICE = Object.freeze({
     repeating: 'The site kept sending albums already shown, so the list stops here.',
     coversDown: { title: "Covers aren't loading from the site's image server.", hint: 'Try again later or on another network.' },
   }),
-  provider: Object.freeze({
-    unconnected: { title: "This provider isn't connected yet.", hint: 'Switch providers with the button next to its name.' },
-  }),
   album: Object.freeze({
     empty: { title: 'This album has no photos on the site.', hint: 'They may have been removed.' },
     photosDown: { title: "Photos aren't loading from the site's image server.", hint: 'Try again later or on another network.' },
@@ -111,6 +127,7 @@ export const NOTICE = Object.freeze({
 
 // Ranges as they read inside a sentence: "Nothing ranked this week yet."
 export const RANGE_PHRASES = Object.freeze({ day: 'today', week: 'this week', month: 'this month', year: 'this year' });
+export const XH_RANGE_PHRASES = Object.freeze({ week: 'in the last 7 days', month: 'in the last 30 days' });
 
 export function photos(count) {
   return `${count.toLocaleString()} ${count === 1 ? 'photo' : 'photos'}`;

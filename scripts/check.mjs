@@ -53,9 +53,9 @@ const headers = read('public/_headers');
 const policy = headers.match(/Content-Security-Policy: (.*)/)?.[1] ?? '';
 if (!/script-src 'self'(;|$)/.test(policy) || /unsafe-(inline|eval)/.test(policy)) report('public/_headers', 0, 'the CSP must allow only same-origin scripts');
 
-// The only remote hosts the app may name: the source site, its video host,
-// and the SVG namespace.
-const HOSTS = /^(?:[a-z0-9-]+\.)*(?:hentai-cosplay-xxx\.com|videos-uploader\.com)$|^www\.w3\.org$/;
+// The only remote hosts the app may name: the source sites, their image and
+// video hosts, and the SVG namespace.
+const HOSTS = /^(?:[a-z0-9-]+\.)*(?:hentai-cosplay-xxx\.com|videos-uploader\.com|xhamster\.com|xhcdn\.com)$|^www\.w3\.org$/;
 for (const file of texts.filter((name) => name.startsWith('public/') || name.startsWith('src/'))) {
   read(file).split('\n').forEach((line, index) => {
     for (const [, host] of line.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)) {

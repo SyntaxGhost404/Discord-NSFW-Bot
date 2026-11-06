@@ -11,16 +11,23 @@ import {
   SOURCE_HOST,
   videoUrl,
 } from './source.js';
+import { isGalleryKey, isNamedGallery, parseXhGallery, parseXhList, XH_HOST, XH_RANGES, XH_SORTS, xhFeedUrl, xhGalleryUrl, xhSearchUrl } from './xh.js';
 
 // The browser loads the app as static files and calls these routes, which
-// read the source site and answer with plain JSON:
+// read a source site and answer with plain JSON. Hentai Cosplay:
 //
 //   GET /api/feed?sort=<sort>&range=<day|week|month|year>&page=<n>
 //   GET /api/search?q=<text>&page=<n>
 //   GET /api/album/<slug>
 //   GET /api/video/<slug>
 //
-// Only fixed paths on the source site are ever requested, so the Worker is
+// xHamster's photo section:
+//
+//   GET /api/xh/feed?sort=<sort>&range=<week|month>&page=<n>
+//   GET /api/xh/search?q=<text>&page=<n>
+//   GET /api/xh/album/<gallery>?page=<n>
+//
+// Only fixed paths on the source sites are ever requested, so the Worker is
 // never an open proxy.
 
 const UPSTREAM_HEADERS = Object.freeze({
@@ -29,6 +36,16 @@ const UPSTREAM_HEADERS = Object.freeze({
   // The desktop layout lists 20 albums per page; the mobile layout lists 10.
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
 });
+// xHamster sends its full pages to a client that names itself plainly.
+const XH_HEADERS = Object.freeze({
+  Accept: 'text/html,application/xhtml+xml',
+  'Accept-Language': 'en-US,en;q=0.8',
+  'User-Agent': 'Mozilla/5.0 (compatible; personal photo viewer)',
+});
+// Each site's request headers, and the hosts its answers may come from
+// (xHamster may answer from a language subdomain).
+const HCX = Object.freeze({ headers: UPSTREAM_HEADERS, accepts: (host) => host === SOURCE_HOST });
+const XH = Object.freeze({ headers: XH_HEADERS, accepts: (host) => host === XH_HOST || host.endsWith(`.${XH_HOST}`) });
 const UPSTREAM_TIMEOUT_MS = 9_000;
 // Seconds that browsers and Cloudflare may reuse an answer. A page the site
 // says it does not have is kept only briefly, so a passing problem on the
@@ -65,11 +82,11 @@ function json(body, status = 200, ttl = 0, extra = {}) {
   });
 }
 
-async function upstream(url, ttl) {
+async function upstream(url, ttl, site = HCX) {
   let response;
   try {
     response = await fetch(url, {
-      headers: UPSTREAM_HEADERS,
+      headers: site.headers,
       redirect: 'follow',
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       // Pages are kept for `ttl`, "not found" for a minute, and refusals and
@@ -79,7 +96,7 @@ async function upstream(url, ttl) {
   } catch (error) {
     throw new HttpError(504, error?.name === 'TimeoutError' ? 'timeout' : 'unreachable');
   }
-  if (new URL(response.url || url).hostname !== SOURCE_HOST) {
+  if (!site.accepts(new URL(response.url || url).hostname)) {
     await response.body?.cancel();
     throw new HttpError(502, 'moved');
   }
@@ -132,6 +149,26 @@ async function listing(source, page, kind) {
   return listAnswer({ page, items, more: state === 'ok' && more, total: limited ? null : total, state, limited });
 }
 
+// The same states for xHamster. It answers a search without results with
+// "not found" and an empty list, and a page past the last with "not found".
+async function xhListing(source, page, kind) {
+  let html;
+  try {
+    html = await upstream(source, LIST_TTL, XH);
+  } catch (error) {
+    if (!(error instanceof HttpError) || error.status !== 404) throw error;
+    const state = page > 1 ? 'end' : kind === 'search' ? 'empty' : 'missing';
+    return listAnswer({ page, items: [], more: false, total: kind === 'search' && page === 1 ? 0 : null, state, limited: false });
+  }
+  const list = parseXhList(html);
+  if (!list) {
+    console.warn(JSON.stringify({ message: 'Unreadable list page.', source }));
+    return listAnswer({ page, items: [], more: false, total: null, state: 'unreadable', limited: false });
+  }
+  const state = list.entries > 0 ? 'ok' : page > 1 ? 'end' : 'empty';
+  return listAnswer({ page, items: list.items, more: state === 'ok' && list.more, total: list.total, state, limited: false });
+}
+
 // The site sent a page, but not one the parser understands: most likely its
 // markup changed. Logged, so the change gets noticed.
 function unreadable(kind, slug) {
@@ -139,8 +176,43 @@ function unreadable(kind, slug) {
   throw new HttpError(502, 'unreadable');
 }
 
+async function xhRoute(url) {
+  const { pathname } = url;
+  if (pathname === '/api/xh/feed') {
+    const sort = url.searchParams.get('sort') || 'best';
+    if (!Object.hasOwn(XH_SORTS, sort)) throw new HttpError(400, 'bad_sort');
+    const requested = url.searchParams.get('range');
+    const range = requested && requested !== 'all' ? requested : null;
+    if (range && (!XH_SORTS[sort].ranked || !Object.hasOwn(XH_RANGES, range))) throw new HttpError(400, 'bad_range');
+    const page = pageOf(url);
+    // A Top list is a single page.
+    if (XH_SORTS[sort].ranked && page > 1) return listAnswer({ page, items: [], more: false, total: null, state: 'end', limited: false });
+    return xhListing(xhFeedUrl(sort, range, page), page, 'feed');
+  }
+  if (pathname === '/api/xh/search') {
+    const query = normalizeQuery(url.searchParams.get('q'));
+    if (!query) throw new HttpError(400, 'bad_query');
+    const page = pageOf(url);
+    return xhListing(xhSearchUrl(query, page), page, 'search');
+  }
+  const album = pathname.match(/^\/api\/xh\/album\/([^/]+)$/);
+  if (album) {
+    const key = album[1];
+    if (!isGalleryKey(key)) throw new HttpError(400, 'bad_slug');
+    const page = pageOf(url);
+    if (page > 1 && !isNamedGallery(key)) throw new HttpError(400, 'bad_page');
+    const gallery = parseXhGallery(await upstream(xhGalleryUrl(key, page), ITEM_TTL, XH));
+    if (!gallery) unreadable('xh album', key);
+    // Past the last page the site shows another page of the gallery.
+    if (gallery.page !== page) return json({ slug: key, ...gallery, page, photos: [] }, 200, ITEM_TTL);
+    return json({ slug: key, ...gallery }, 200, gallery.photos.length > 0 ? ITEM_TTL : MISSING_TTL);
+  }
+  throw new HttpError(404, 'not_found');
+}
+
 async function route(url) {
   const { pathname } = url;
+  if (pathname.startsWith('/api/xh/')) return xhRoute(url);
   if (pathname === '/api/feed') {
     const sort = url.searchParams.get('sort') || 'recent';
     if (!Object.hasOwn(SORTS, sort)) throw new HttpError(400, 'bad_sort');

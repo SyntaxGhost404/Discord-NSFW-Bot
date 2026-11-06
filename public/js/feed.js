@@ -4,10 +4,11 @@ import { icon } from './icons.js';
 import { mark } from './mark.js';
 import { banner, imageWatch, listOutcome, noticeElement, problem, searchable, whenOnline } from './notices.js';
 import { DEFAULT_PROVIDER, providerById, providerTitle } from './providers.js';
-import { day, NOTICE, RANGE_LABELS, RANGED_SORTS, results, SORT_LABELS, TEXT } from './text.js';
+import { day, NOTICE, photos, results, TEXT } from './text.js';
 
 // Cover widths per layout: two columns on phones up to five on wide
-// screens. The browser picks the 305-pixel copy or the full image from it.
+// screens. Where a provider has two sizes, the browser picks the 305-pixel
+// copy or the full image from it; otherwise the one image is the largest.
 const COVER_SIZES = '(min-width: 1280px) 248px, (min-width: 960px) 24vw, (min-width: 640px) 32vw, 48vw';
 // Start loading the next page this far before the end of the list.
 const LOOKAHEAD = 1600;
@@ -29,27 +30,27 @@ const LIMITED_STALE_PAGES = 6;
 const TITLE_SIZE = 20;
 const TITLE_MIN = 15;
 
-// A provider's first page: its newest albums.
-export const homeState = (provider = DEFAULT_PROVIDER) => ({ provider, q: '', sort: 'recent', range: 'all' });
+// A provider's first page, in its default order.
+export const homeState = (provider = DEFAULT_PROVIDER) => ({ provider, q: '', sort: providerById(provider).defaultSort, range: 'all' });
 
 export function readFeedState(search) {
   const params = new URLSearchParams(search);
   const provider = providerById(params.get('provider'));
-  // A provider without a source has nothing to sort or search.
-  if (!provider.connected) return homeState(provider.id);
+  const home = homeState(provider.id);
   const q = (params.get('q') ?? '').replace(/\s+/g, ' ').trim().slice(0, MAXIMUM_QUERY);
-  if (q) return { provider: provider.id, q, sort: 'recent', range: 'all' };
-  const sort = Object.hasOwn(SORT_LABELS, params.get('sort') ?? '') ? params.get('sort') : 'recent';
-  const range = RANGED_SORTS.has(sort) && Object.hasOwn(RANGE_LABELS, params.get('range') ?? '') ? params.get('range') : 'all';
-  return { provider: provider.id, q: '', sort, range };
+  if (q) return { ...home, q };
+  const sort = Object.hasOwn(provider.sortLabels, params.get('sort') ?? '') ? params.get('sort') : home.sort;
+  const range = provider.rangedSorts.has(sort) && Object.hasOwn(provider.rangeLabels, params.get('range') ?? '') ? params.get('range') : 'all';
+  return { ...home, sort, range };
 }
 
 export function feedPath(state) {
+  const provider = providerById(state.provider);
   const params = new URLSearchParams();
-  if (state.provider !== DEFAULT_PROVIDER) params.set('provider', state.provider);
+  if (provider.id !== DEFAULT_PROVIDER) params.set('provider', provider.id);
   if (state.q) params.set('q', state.q);
   else {
-    if (state.sort !== 'recent') params.set('sort', state.sort);
+    if (state.sort !== provider.defaultSort) params.set('sort', state.sort);
     if (state.range !== 'all') params.set('range', state.range);
   }
   const query = params.toString();
@@ -65,10 +66,11 @@ function cover(item, watch) {
     frame.append(icon('missing', 26));
   };
   if (item.cover) {
+    const sized = Boolean(item.cover.small);
     const image = h('img', {
-      src: item.cover.small,
-      srcset: `${item.cover.small} 305w, ${item.cover.large} ${item.kind === 'video' ? 604 : 1024}w`,
-      sizes: COVER_SIZES,
+      src: sized ? item.cover.small : item.cover.large,
+      srcset: sized ? `${item.cover.small} 305w, ${item.cover.large} ${item.kind === 'video' ? 604 : 1024}w` : null,
+      sizes: sized ? COVER_SIZES : null,
       alt: '',
       loading: 'lazy',
       decoding: 'async',
@@ -80,8 +82,8 @@ function cover(item, watch) {
       watch?.loaded();
     }, { once: true });
     // One size can fail where the other works (the site resizes covers on a
-    // separate service), so a cover tries the other size once.
-    let other = true;
+    // separate service), so a cover with two sizes tries the other once.
+    let other = sized;
     image.addEventListener('error', () => {
       if (other) {
         other = false;
@@ -108,7 +110,7 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
   let browseState = state.q ? homeState(state.provider) : { ...state };
   let searching = Boolean(state.q);
   let list = null;
-  const connected = () => providerById(state.provider).connected;
+  const provider = () => providerById(state.provider);
 
   const barRow = h('div', { class: 'bar-row' });
   const filters = h('div', { class: 'filters' });
@@ -144,14 +146,16 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
   new ResizeObserver(fitTitle).observe(barRow);
 
   function prefetch(item) {
-    (item.kind === 'video' ? api.video(item.slug) : api.album(item.slug)).catch(() => {});
+    (item.kind === 'video' ? api.video(item.slug) : api.album(provider(), item.slug)).catch(() => {});
   }
 
+  // A card shows the album's date where the list gives one, and its size.
   function card(item, watch) {
-    const link = h('a', { class: 'card', href: `/${item.kind}/${item.slug}` },
+    const meta = [item.date ? day(item.date) : '', item.count ? photos(item.count) : ''].filter(Boolean).join(' · ');
+    const link = h('a', { class: 'card', href: `${provider().path}/${item.kind}/${item.slug}` },
       cover(item, watch),
       h('span', { class: 'card-title' }, item.title),
-      item.date ? h('span', { class: 'card-date' }, day(item.date)) : null);
+      meta ? h('span', { class: 'card-date' }, meta) : null);
     link.addEventListener('click', (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
@@ -206,16 +210,12 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
       if (!state.q) requestAnimationFrame(() => input.focus());
       return;
     }
-    title.textContent = providerTitle(providerById(state.provider));
-    barRow.replaceChildren(brand, ...(connected() ? [searchButton, sortButton] : []));
+    title.textContent = providerTitle(provider());
+    barRow.replaceChildren(brand, searchButton, sortButton);
     fitTitle();
   }
 
   function renderFilters() {
-    if (!connected()) {
-      filters.replaceChildren();
-      return;
-    }
     if (state.q) {
       // The site's count, only when it can be trusted.
       const counted = list && !list.outcome && !list.limited && list.total != null;
@@ -227,12 +227,13 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
       filters.replaceChildren();
       return;
     }
-    const sortChip = h('button', { class: 'chip chip-select sq', type: 'button', 'aria-haspopup': 'dialog' }, h('span', {}, SORT_LABELS[state.sort]), icon('down', 16));
+    const { sortLabels, rangedSorts, rangeLabels } = provider();
+    const sortChip = h('button', { class: 'chip chip-select sq', type: 'button', 'aria-haspopup': 'dialog' }, h('span', {}, sortLabels[state.sort]), icon('down', 16));
     sortChip.addEventListener('click', () => onPickSort(state.sort));
     const chips = [sortChip];
-    if (RANGED_SORTS.has(state.sort)) {
-      for (const range of Object.keys(RANGE_LABELS)) {
-        const chip = h('button', { class: 'chip sq', type: 'button', 'aria-pressed': String(range === state.range) }, RANGE_LABELS[range]);
+    if (rangedSorts.has(state.sort)) {
+      for (const range of Object.keys(rangeLabels)) {
+        const chip = h('button', { class: 'chip sq', type: 'button', 'aria-pressed': String(range === state.range) }, rangeLabels[range]);
         chip.addEventListener('click', () => {
           if (range !== state.range) apply({ ...state, range });
         });
@@ -258,7 +259,7 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
     } else if (list.loading && list.page > 0) {
       status.replaceChildren(h('div', { class: 'loader', role: 'progressbar', 'aria-label': 'Loading' }, h('span', { class: 'sq' }), h('span', { class: 'sq' }), h('span', { class: 'sq' })));
     } else if (list.outcome) {
-      status.replaceChildren(noticeElement(listOutcome(list.outcome, state), retry));
+      status.replaceChildren(noticeElement(listOutcome(list.outcome, { ...state, phrases: provider().rangePhrases }), retry));
     } else if (!list.more) {
       // Stopping because the site kept repeating itself is not the end of
       // the list, and the viewer says so.
@@ -290,14 +291,6 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
   async function load() {
     if (!list || list.loading || !list.more || list.error || list.outcome) return;
     const current = list;
-    // A provider with no source behind it: say so without asking anything.
-    if (!connected()) {
-      clear(grid);
-      current.outcome = 'unconnected';
-      current.more = false;
-      renderStatus();
-      return;
-    }
     // The site matches only letters and numbers; say so without asking it.
     if (state.q && !searchable(state.q)) {
       clear(grid);
@@ -311,8 +304,8 @@ export function createFeed({ initial, onOpen, onPickSort, onPickProvider, onStat
     const page = current.page + 1;
     try {
       const data = state.q
-        ? await api.search({ q: state.q, page })
-        : await api.feed({ sort: state.sort, range: state.range === 'all' ? null : state.range, page });
+        ? await api.search({ provider: provider(), q: state.q, page })
+        : await api.feed({ provider: provider(), sort: state.sort, range: state.range === 'all' ? null : state.range, page });
       if (current !== list) return;
       if (current.page === 0) clear(grid);
       // Answers cached from before lists had a state are read by their

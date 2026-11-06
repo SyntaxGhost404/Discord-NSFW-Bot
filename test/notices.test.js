@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { listOutcome, problem, searchable } from '../public/js/notices.js';
-import { NOTICE } from '../public/js/text.js';
+import { NOTICE, XH_RANGE_PHRASES } from '../public/js/text.js';
 
 describe('problem', () => {
   it('names the failure and offers to try again only where that can help', () => {
@@ -48,8 +48,9 @@ describe('listOutcome', () => {
     expect(listOutcome('missing', { sort: 'likes' })).toEqual({ ...NOTICE.feed.missing, retry: true });
   });
 
-  it('says a provider without a source is not connected, with nothing to retry', () => {
-    expect(listOutcome('unconnected', { sort: 'recent' })).toEqual({ ...NOTICE.provider.unconnected, retry: false });
+  it('names an empty ranking in the provider\'s own terms', () => {
+    expect(listOutcome('empty', { sort: 'rated', range: 'week', phrases: XH_RANGE_PHRASES })).toEqual({ title: NOTICE.feed.ranged('in the last 7 days'), hint: NOTICE.feed.longerRange, retry: false });
+    expect(listOutcome('empty', { sort: 'best', phrases: XH_RANGE_PHRASES })).toEqual({ ...NOTICE.feed.empty, retry: false });
   });
 
   it('offers to read a page again when it could not be read', () => {

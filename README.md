@@ -1,8 +1,9 @@
 # Cosplay Viewer
 
-A mobile-first, ad-free viewer for hentai-cosplay-xxx.com that runs on the
-Cloudflare Workers Free plan. It shows the site's albums and videos without
-the site's ads, pop-ups, trackers, or scripts. Adults only.
+A mobile-first, ad-free viewer for two sites' albums, hentai-cosplay-xxx.com
+and xHamster's photo galleries, that runs on the Cloudflare Workers Free
+plan. It shows their albums, and Hentai Cosplay's videos, without the sites'
+ads, pop-ups, trackers, or scripts. Adults only.
 
 ## What it does
 
@@ -12,10 +13,17 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
 - **Provider switcher.** The header shows the active provider's address with
   a small chevron button right beside it. The button opens a sheet listing
   the providers, built from the same parts as the sort sheet. Hentai Cosplay
-  is the default. The second entry, Placeholder, is there to try switching:
-  it has no source yet, so the viewer says so and requests nothing for it.
+  is the default and xHamster the second; each keeps its own sorts, search,
+  and album links.
+- **xHamster.** Its photo galleries, straight section only: Best and Newest,
+  and the top rated, most viewed, and most commented photos of the last 7
+  days, 30 days, or all time (each opens its gallery), plus search. Cards
+  show each gallery's photo count, and an open gallery shows its date. Every
+  photo and cover loads at its original size, the largest file the site has
+  (2000 pixels wide for many galleries). A gallery's later pages of 60 load
+  one after another into the same list.
 - **Feed.** Covers, titles, and dates in a grid that keeps loading as you
-  scroll, in any of the site's eleven orders: most recent, most popular, most
+  scroll, in any of Hentai Cosplay's eleven orders: most recent, most popular, most
   downloaded, most liked, most bookmarked, recently popular, recent downloads,
   recent likes, recent bookmarks, most recent videos, and most popular videos.
   The download, like, and bookmark rankings also come per day, week, month,
@@ -38,16 +46,19 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
 ## Privacy and safety
 
 - The page loads only its own files. Its Content Security Policy allows
-  scripts and styles from the app alone, images only from the site's image
-  servers, and video only from its video servers. There are no inline
+  scripts and styles from the app alone, images only from the sites' image
+  servers, and video only from Hentai Cosplay's video servers. There are no inline
   scripts, third-party scripts, web fonts, or analytics.
-- The Worker reads a fixed set of pages on the site (lists, search results,
-  album story pages, and video pages) and returns only the fields the app
-  shows, as JSON. It never passes on the site's HTML or scripts. Unknown
+- The Worker reads a fixed set of pages on each site (lists, search results,
+  album and gallery pages, and video pages) and returns only the fields the
+  app shows, as JSON. On xHamster it asks only for the straight photo
+  section, and names itself plainly in its requests. It never passes on the site's HTML or scripts. Unknown
   sorts, ranges, pages, and album names are refused before the site is
   contacted, so the Worker cannot be used as an open proxy.
-- Every image and stream address the Worker returns must match the site's
-  image or video servers; anything else is dropped.
+- Every image and stream address the Worker returns must match the sites'
+  image or video servers; anything else is dropped. xHamster's image
+  addresses are signed, so they are passed on exactly as the site serves
+  them.
 - Photos and video load straight from those servers, without a referrer.
   They see your IP address, as with any image on the web.
 - Pages ask search engines not to index them, and the app cannot be framed by
@@ -58,23 +69,32 @@ the site's ads, pop-ups, trackers, or scripts. Adults only.
 - `public/` is the app: plain HTML, CSS, and JavaScript modules with no build
   step. Workers static assets serve it at no cost, and any path that is not a
   file serves `index.html`, so links such as `/album/<slug>` work.
-- `public/js/providers.js` lists the providers. A feed's address names its
-  provider (`/?provider=placeholder`) unless it is the default one, so
-  existing links still work. Switching providers replaces the address, like
-  a sort change. Only Hentai Cosplay has a Worker behind it so far.
+- `public/js/providers.js` lists the providers, each with its own sorts and
+  routes. A feed's address names its provider (`/?provider=xh`) unless it is
+  the default one, and its albums live under its own path
+  (`/xh/album/<gallery>`), so existing links still work. Switching providers
+  replaces the address, like a sort change.
 - `src/worker.js` runs only for `/api/*` (`run_worker_first` in
   `wrangler.jsonc`):
   - `GET /api/feed?sort=<sort>&range=<day|week|month|year>&page=<n>`
   - `GET /api/search?q=<text>&page=<n>`
   - `GET /api/album/<slug>`
   - `GET /api/video/<slug>`
-- Each API request reads one page from the site. A list page holds 20 items.
+  - `GET /api/xh/feed?sort=<sort>&range=<week|month>&page=<n>`
+  - `GET /api/xh/search?q=<text>&page=<n>`
+  - `GET /api/xh/album/<gallery>?page=<n>`
+- Each API request reads one page from a site. A list page holds 20 items.
   Albums come from the site's story view, which names every photo at once,
   so an album of any size takes one request.
 - `src/parse.js` reads those pages with plain string scans. In local
   measurements, the story page of a 1,626 photo album (about 1 MB) parses in
   about 5 ms on a cold start and 2 ms after that, within the Free plan's
   10 ms CPU limit.
+- `src/xh.js` reads xHamster's pages from the JSON they carry for their own
+  scripts (`window.initials`), not from the markup. A list page holds 60
+  galleries (a Top list holds 50 photos, shown once per gallery), and a
+  gallery comes 60 photos per request, so the app asks for its later pages
+  one after another. In local measurements a page parses in 1 to 4.5 ms.
 - Lists are cached for 2 minutes and albums and videos for a day: the Worker
   asks Cloudflare's cache to keep the site's pages where edge caching applies,
   and browsers reuse the answers for the same time. A page the site says it
@@ -118,8 +138,10 @@ one catch-all message, and offers Try again only where that can help.
   needs an update.
 - **The age gate** says the answer is saved only when the browser can save
   it.
-- **A provider without a source** says it isn't connected yet, without
-  search, sorts, or a Try again button, and nothing is requested for it.
+- **xHamster.** A search without results says so (the site answers one with
+  "not found"). Private, removed, and region-blocked galleries are left out
+  of lists. If a gallery's later page fails to load, the photos so far stay
+  and Try again loads the rest.
 
 ## Deploy
 
@@ -149,7 +171,7 @@ npm run check     # static checks
 npm run validate  # both
 ```
 
-Tests mock every outbound request, so they never reach the site.
+Tests mock every outbound request, so they never reach the sites.
 `npm run check` enforces the app's rules: no en or em dashes and no emoji in
 any file, no accent colors in the banned hues (pink, purple, violet, blue,
 and orange), no `innerHTML` or similar APIs, only local scripts in the page,
@@ -176,8 +198,12 @@ no third-party hosts, and no secrets in files that would be committed.
 
 ## Limits
 
-- The app depends on the site's markup. If the site changes its pages,
-  `src/parse.js` needs an update; the tests describe the markup it expects.
+- The app depends on the sites' pages. If Hentai Cosplay changes its markup,
+  `src/parse.js` needs an update; if xHamster changes the data on its pages,
+  `src/xh.js` does. The tests describe what each one expects.
+- xHamster may show an age-verification page in some regions. If it shows
+  one to the Worker, the viewer says it couldn't read the page; it does not
+  try to get around it.
 - Video needs a browser that plays HLS on its own, because the site's streams
   do not allow other players to load them.
 - The site's image servers block some automated browsers. Regular browsers
@@ -185,9 +211,9 @@ no third-party hosts, and no secrets in files that would be committed.
 
 ## Personal use
 
-This is a personal viewer for content hosted by hentai-cosplay-xxx.com. It
-does not host, store, or change that content. Respect the site's terms and
-the laws where you live.
+This is a personal viewer for content hosted by hentai-cosplay-xxx.com and
+xHamster. It does not host, store, or change that content. Respect the
+sites' terms and the laws where you live.
 
 ## License
 

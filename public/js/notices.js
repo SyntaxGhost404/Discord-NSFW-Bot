@@ -30,19 +30,17 @@ function searchHint(query) {
 }
 
 // A list that came back without albums, in the context it was asked in:
-// { q } for a search, { sort, range } for a sort. 'unconnected' is a list
-// the viewer never asked for, because its provider has no source yet.
-export function listOutcome(state, { q = '', sort = 'recent', range = 'all' } = {}) {
+// { q } for a search, { sort, range } for a sort, and `phrases`, the
+// provider's ranges as they read in a sentence.
+export function listOutcome(state, { q = '', sort = 'recent', range = 'all', phrases = RANGE_PHRASES } = {}) {
   if (state === 'unreadable') return { ...NOTICE.errors.unreadable, retry: true };
-  // A provider with no source behind it: nothing was asked, nothing to retry.
-  if (state === 'unconnected') return { ...NOTICE.provider.unconnected, retry: false };
   if (q) {
     if (state === 'nothing') return { ...NOTICE.search.nothing, retry: false };
     if (state === 'refused') return { title: NOTICE.search.refused(q), hint: words(q) > 1 ? NOTICE.search.fewerOrDifferent : NOTICE.search.different, retry: false };
     return { title: NOTICE.search.empty(q), hint: searchHint(q), retry: false };
   }
   if (state === 'missing') return { ...NOTICE.feed.missing, retry: true };
-  if (RANGE_PHRASES[range]) return { title: NOTICE.feed.ranged(RANGE_PHRASES[range]), hint: NOTICE.feed.longerRange, retry: false };
+  if (phrases[range]) return { title: NOTICE.feed.ranged(phrases[range]), hint: NOTICE.feed.longerRange, retry: false };
   return { ...(VIDEO_SORTS.has(sort) ? NOTICE.feed.noVideos : NOTICE.feed.empty), retry: false };
 }
 

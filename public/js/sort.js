@@ -1,12 +1,11 @@
 import { openOptionSheet } from './sheet.js';
-import { SORT_GROUPS, SORT_LABELS, TEXT } from './text.js';
+import { TEXT } from './text.js';
 
-// The sort picker: every order the source site offers, grouped by albums
-// and videos.
-export function openSortSheet({ current, onPick, requestClose }) {
+// The sort picker: every order the provider offers, in its groups.
+export function openSortSheet({ provider, current, onPick, requestClose }) {
   return openOptionSheet({
     label: TEXT.sort,
-    groups: SORT_GROUPS.map((group) => ({ label: group.label, options: group.sorts.map((sort) => ({ value: sort, label: SORT_LABELS[sort] })) })),
+    groups: provider.sortGroups.map((group) => ({ label: group.label, options: group.sorts.map((sort) => ({ value: sort, label: provider.sortLabels[sort] })) })),
     current,
     onPick,
     requestClose,

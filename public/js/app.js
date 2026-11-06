@@ -3,17 +3,17 @@ import { settle } from './dom.js';
 import { createFeed, feedPath, homeState, readFeedState, sameFeed } from './feed.js';
 import { ageGate } from './gate.js';
 import { openLightbox } from './lightbox.js';
-import { openProviderSheet } from './providers.js';
+import { DEFAULT_PROVIDER, openProviderSheet, providerById, providerByPath } from './providers.js';
 import { openSortSheet } from './sort.js';
 import { startSquircles } from './squircle.js';
-import { RANGED_SORTS } from './text.js';
 import { createVideoView } from './video.js';
 
 // Routes:
 //   /                      the feed (?sort=, &range=, or ?q= for a search;
 //                          ?provider= for any provider but the default)
-//   /album/<slug>          an album, over the feed
-//   /video/<slug>          a video, over the feed
+//   /album/<slug>          a Hentai Cosplay album, over the feed
+//   /video/<slug>          a Hentai Cosplay video, over the feed
+//   /xh/album/<gallery>    an xHamster gallery, over the feed
 // The sort and provider sheets and the photo viewer are history entries
 // too, so the back button or gesture closes them first.
 
@@ -21,16 +21,23 @@ const root = document.getElementById('app');
 startSquircles(document.body);
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
-// Album and video names on the site are lowercase; a link typed or shared
-// with capitals still opens the album.
+const ITEM_ROUTE = /^\/(?:([a-z]+)\/)?(album|video)\/([a-z0-9_-]{1,320})\/?$/i;
+
+// Album and video names on the sites are lowercase; a link typed or shared
+// with capitals still opens the album. Only providers with videos have
+// video pages.
 function currentRoute() {
-  const match = location.pathname.match(/^\/(album|video)\/([a-z0-9_-]{1,320})\/?$/i);
-  return match ? { kind: match[1].toLowerCase(), slug: match[2].toLowerCase() } : { kind: 'feed', state: readFeedState(location.search) };
+  const match = location.pathname.match(ITEM_ROUTE);
+  const provider = match && (match[1] ? providerByPath(`/${match[1].toLowerCase()}`) : providerById(DEFAULT_PROVIDER));
+  const kind = match?.[2].toLowerCase();
+  if (!provider || (kind === 'video' && !provider.videos)) return { kind: 'feed', state: readFeedState(location.search) };
+  return { kind, slug: match[3].toLowerCase(), provider: provider.id };
 }
 
 // The address a route is shown under, so the address bar never names a page
 // the app is not showing.
-const addressOf = (route) => (route.kind === 'feed' ? feedPath(route.state) : `/${route.kind}/${route.slug}`);
+const itemPath = (provider, kind, slug) => `${providerById(provider).path}/${kind}/${slug}`;
+const addressOf = (route) => (route.kind === 'feed' ? feedPath(route.state) : itemPath(route.provider, route.kind, route.slug));
 
 function start() {
   let feed = null;
@@ -79,16 +86,19 @@ function start() {
 
   function onOpen(item, link) {
     opener = link;
-    go(`/${item.kind}/${item.slug}`, { item: { kind: item.kind, slug: item.slug, title: item.title, date: item.date } });
+    const { provider } = feed.state;
+    go(itemPath(provider, item.kind, item.slug), { item: { provider, kind: item.kind, slug: item.slug, title: item.title, date: item.date, count: item.count } });
   }
 
   function onPickSort(current) {
     if (overlay) return;
+    const provider = providerById(feed.state.provider);
     openOverlay('sort', () => openSortSheet({
+      provider,
       current,
       requestClose: () => closeOverlay(),
       onPick: (sort) => closeOverlay(() => {
-        feed.apply({ ...feed.state, q: '', sort, range: RANGED_SORTS.has(sort) ? feed.state.range : 'all' });
+        feed.apply({ ...feed.state, q: '', sort, range: provider.rangedSorts.has(sort) ? feed.state.range : 'all' });
       }),
     }));
   }
@@ -106,12 +116,11 @@ function start() {
     }));
   }
 
-  function onOpenPhoto({ base, files, index }) {
+  function onOpenPhoto({ photos, index }) {
     if (overlay) return;
     let last = index;
     openOverlay('photo', () => openLightbox({
-      base,
-      files,
+      photos,
       index,
       requestClose: () => closeOverlay(),
       onChange: (position) => {
@@ -132,7 +141,8 @@ function start() {
 
   async function openDetail(route, summary, from) {
     const create = route.kind === 'album' ? createAlbumView : createVideoView;
-    const view = create({ slug: route.slug, summary: summary?.slug === route.slug ? summary : null, onBack: back, onOpenPhoto });
+    const known = summary?.slug === route.slug && (summary.provider ?? DEFAULT_PROVIDER) === route.provider ? summary : null;
+    const view = create({ provider: providerById(route.provider), slug: route.slug, summary: known, onBack: back, onOpenPhoto });
     detail = { ...route, view, from };
     root.append(view.element);
     document.documentElement.classList.add('locked');
@@ -175,8 +185,9 @@ function start() {
       ensureFeed(route.state);
       if (detail) closeDetail();
     } else {
-      ensureFeed(feed ? feed.state : readFeedState(''));
-      if (!detail || detail.kind !== route.kind || detail.slug !== route.slug) {
+      // Opened from a link, an album has its own provider's feed behind it.
+      ensureFeed(feed ? feed.state : homeState(route.provider));
+      if (!detail || detail.provider !== route.provider || detail.kind !== route.kind || detail.slug !== route.slug) {
         if (detail) closeDetail();
         openDetail(route, state.item, opener);
       }
