@@ -123,8 +123,11 @@ one catch-all message, and offers Try again only where that can help.
   ranked today yet"). A list that keeps repeating itself stops, and says why.
 - **Failures.** Offline, a site that is slow, down, or turning requests
   away, and the viewer being over its own request limit are each named. A
-  list that failed offline loads again by itself once the browser is back
-  online.
+  site error says which status the site answered with ("It answered with
+  error 520"), and the Worker logs it with the start of the page
+  (`Upstream error`). A site that answers 451 is said not to serve the
+  region. A list that failed offline loads again by itself once the browser
+  is back online.
 - **Albums and videos.** A removed album or video says so, with no Try
   again. An album without photos and a video page without a stream say so
   too, and a stream that fails while playing can be loaded again.

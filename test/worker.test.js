@@ -100,7 +100,7 @@ describe('feed', () => {
     site(() => html('<h1>Server error</h1><script>evil()</script>', { status: 500 }));
     let response = await get('/api/feed');
     expect(response.status).toBe(502);
-    expect(await response.json()).toEqual({ error: 'upstream' });
+    expect(await response.json()).toEqual({ error: 'upstream', upstream: 500 });
 
     site(() => redirected(html(LISTING), 'https://evil.example/search/'));
     response = await get('/api/feed');
@@ -265,24 +265,36 @@ describe('list outcomes', () => {
 describe('site failures', () => {
   it('names each way the site can fail, and caches none of them', async () => {
     const cases = [
-      [() => html('Forbidden', { status: 403 }), 502, 'blocked'],
-      [() => html('Slow down', { status: 429 }), 502, 'blocked'],
-      [() => new Response('Just a moment', { status: 503, headers: { 'cf-mitigated': 'challenge' } }), 502, 'blocked'],
-      [() => html('Oops', { status: 500 }), 502, 'upstream'],
-      [() => redirected(html(LISTING), 'https://elsewhere.example/'), 502, 'moved'],
+      [() => html('Forbidden', { status: 403 }), 502, { error: 'blocked', upstream: 403 }],
+      [() => html('Slow down', { status: 429 }), 502, { error: 'blocked', upstream: 429 }],
+      [() => new Response('Just a moment', { status: 503, headers: { 'cf-mitigated': 'challenge' } }), 502, { error: 'blocked', upstream: 503 }],
+      [() => html('Not here', { status: 451 }), 502, { error: 'unavailable', upstream: 451 }],
+      [() => html('Oops', { status: 500 }), 502, { error: 'upstream', upstream: 500 }],
+      [() => html('Origin error', { status: 520 }), 502, { error: 'upstream', upstream: 520 }],
+      [() => redirected(html(LISTING), 'https://elsewhere.example/'), 502, { error: 'moved' }],
       [() => {
         throw new TypeError('Network connection lost.');
-      }, 504, 'unreachable'],
+      }, 504, { error: 'unreachable' }],
       [() => {
         throw new DOMException('The operation timed out.', 'TimeoutError');
-      }, 504, 'timeout'],
+      }, 504, { error: 'timeout' }],
     ];
-    for (const [respond, status, error] of cases) {
+    for (const [respond, status, body] of cases) {
       site(respond);
       const response = await get('/api/feed');
-      expect(response.status, error).toBe(status);
-      expect(await response.json()).toEqual({ error });
+      expect(response.status, body.error).toBe(status);
+      expect(await response.json()).toEqual(body);
       expect(response.headers.get('Cache-Control')).toBe('no-store');
     }
+  });
+
+  it('logs a refusal with its status and the start of the page', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    site(() => new Response('<html>\n  <title>Error 1020</title>  Access   denied</html>', { status: 520, headers: { server: 'cloudflare', 'cf-ray': 'abc-IAD' } }));
+    await get('/api/feed');
+    const entry = JSON.parse(warn.mock.calls.at(-1)[0]);
+    expect(entry).toMatchObject({ message: 'Upstream error.', url: `${SITE}/search/`, status: 520, server: 'cloudflare', ray: 'abc-IAD' });
+    expect(entry.page).toBe('<html> <title>Error 1020</title> Access denied</html>');
+    warn.mockRestore();
   });
 });

@@ -20,6 +20,8 @@ export function problem(error, subject = 'list') {
   if (code.startsWith('bad_')) return { ...NOTICE.invalid, retry: false };
   // A failure the viewer has no name for may well pass: offer to try again.
   if (!NOTICE.errors[code]) return { ...NOTICE.errors.server, retry: true };
+  // A site error says which status the site answered with, when known.
+  if (code === 'upstream' && Number.isInteger(error.upstream)) return { ...NOTICE.errors.upstream, hint: NOTICE.errors.upstreamStatus(error.upstream), retry: true };
   return { ...NOTICE.errors[code], retry: RETRYABLE.has(code) };
 }
 

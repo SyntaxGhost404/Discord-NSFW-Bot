@@ -67,11 +67,27 @@ const API_HEADERS = Object.freeze({
   'X-Robots-Tag': 'noindex, nofollow',
 });
 
+// `detail` goes into the error answer as is, such as the status a site
+// answered with ({ upstream: 520 }).
 class HttpError extends Error {
-  constructor(status, code) {
+  constructor(status, code, detail = {}) {
     super(code);
     this.status = status;
     this.code = code;
+    this.detail = detail;
+  }
+}
+
+// The start of a page, for the logs. Only the first chunk is read.
+async function opening(response, limit = 300) {
+  try {
+    const reader = response.body?.getReader();
+    if (!reader) return '';
+    const { value } = await reader.read();
+    await reader.cancel();
+    return new TextDecoder().decode(value ?? new Uint8Array()).replace(/\s+/g, ' ').slice(0, limit);
+  } catch {
+    return '';
   }
 }
 
@@ -101,12 +117,18 @@ async function upstream(url, ttl, site = HCX) {
     throw new HttpError(502, 'moved');
   }
   if (!response.ok) {
-    await response.body?.cancel();
-    if (response.status === 404 || response.status === 410) throw new HttpError(404, 'not_found');
+    const { status, headers } = response;
+    if (status === 404 || status === 410) {
+      await response.body?.cancel();
+      throw new HttpError(404, 'not_found');
+    }
+    // Any other refusal is logged with the start of the page, so its cause
+    // can be read in the Worker's logs, and the answer names the status.
+    console.warn(JSON.stringify({ message: 'Upstream error.', url, status, server: headers.get('server'), ray: headers.get('cf-ray'), mitigated: headers.get('cf-mitigated'), type: headers.get('content-type'), page: await opening(response) }));
     // The site's firewall turns requests away with 403 or 429, or with a
-    // challenge page.
-    const blocked = response.status === 403 || response.status === 429 || response.headers.get('cf-mitigated') === 'challenge';
-    throw new HttpError(502, blocked ? 'blocked' : 'upstream');
+    // challenge page; 451 means the site does not serve this region.
+    const blocked = status === 403 || status === 429 || headers.get('cf-mitigated') === 'challenge';
+    throw new HttpError(502, blocked ? 'blocked' : status === 451 ? 'unavailable' : 'upstream', { upstream: status });
   }
   return response.text();
 }
@@ -254,7 +276,7 @@ export default {
     try {
       return await route(url);
     } catch (error) {
-      if (error instanceof HttpError) return json({ error: error.code }, error.status);
+      if (error instanceof HttpError) return json({ error: error.code, ...error.detail }, error.status);
       console.error(JSON.stringify({ message: 'Unexpected API error.', path: url.pathname, error: String(error?.stack ?? error) }));
       return json({ error: 'internal' }, 500);
     }

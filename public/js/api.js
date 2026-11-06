@@ -7,7 +7,9 @@ const MAXIMUM_ENTRIES = 80;
 const KEEP = new Set(['ok', 'empty', 'end']);
 const answers = new Map();
 
-const failure = (code, status = 0) => Object.assign(new Error(`Request failed: ${code}`), { code, status });
+// `upstream` is the status the source site answered with, when the Worker
+// passes one on.
+const failure = (code, status = 0, upstream = null) => Object.assign(new Error(`Request failed: ${code}`), { code, status, upstream });
 
 async function call(path) {
   let response;
@@ -23,7 +25,7 @@ async function call(path) {
     // Not JSON: an error page from the platform, not from the Worker.
   }
   // 429 from the platform: the viewer itself is over its request limit.
-  if (!response.ok || !body) throw failure(body?.error ?? (response.status === 429 ? 'busy' : 'server'), response.status);
+  if (!response.ok || !body) throw failure(body?.error ?? (response.status === 429 ? 'busy' : 'server'), response.status, Number.isInteger(body?.upstream) ? body.upstream : null);
   return body;
 }
 

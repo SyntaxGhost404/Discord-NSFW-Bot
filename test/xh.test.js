@@ -115,6 +115,13 @@ describe('xHamster lists', () => {
     expect(items[0].title).toBe('Red dress · part 2');
   });
 
+  it('passes on the status xHamster refused with', async () => {
+    site(() => html('Bad request', { status: 400 }));
+    const response = await get('/api/xh/feed');
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: 'upstream', upstream: 400 });
+  });
+
   it('says when a page is past the end, missing, or cannot be read', async () => {
     site(() => html('Not found', { status: 404 }));
     expect(await (await get('/api/xh/feed?page=2000')).json()).toMatchObject({ state: 'end', items: [] });

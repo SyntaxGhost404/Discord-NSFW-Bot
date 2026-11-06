@@ -16,6 +16,13 @@ describe('problem', () => {
     expect(problem({ code: 'bad_slug' }, 'album')).toEqual({ ...NOTICE.invalid, retry: false });
   });
 
+  it('names the status a site answered with, and a site that does not serve the region', () => {
+    expect(problem({ code: 'upstream', upstream: 520 })).toEqual({ title: NOTICE.errors.upstream.title, hint: NOTICE.errors.upstreamStatus(520), retry: true });
+    expect(problem({ code: 'upstream', upstream: 520 }).hint).toBe('It answered with error 520. Try again in a moment.');
+    expect(problem({ code: 'upstream' })).toEqual({ ...NOTICE.errors.upstream, retry: true });
+    expect(problem({ code: 'unavailable', upstream: 451 })).toEqual({ ...NOTICE.errors.unavailable, retry: false });
+  });
+
   it('treats a failure it has no name for as one that may pass', () => {
     expect(problem({ code: 'something_new' })).toEqual({ ...NOTICE.errors.server, retry: true });
     expect(problem(new Error('plain'))).toEqual({ ...NOTICE.errors.server, retry: true });

@@ -82,6 +82,8 @@ export const NOTICE = Object.freeze({
     unreachable: { title: "Couldn't reach the site.", hint: 'It may be down. Try again in a moment.' },
     blocked: { title: 'The site turned the request away.', hint: 'This usually passes. Try again later.' },
     upstream: { title: 'The site had a problem.', hint: 'Try again in a moment.' },
+    upstreamStatus: (status) => `It answered with error ${status}. Try again in a moment.`,
+    unavailable: { title: "The site isn't available here.", hint: "It doesn't serve this region." },
     moved: { title: 'The site sent an unexpected answer.', hint: 'Try again later.' },
     busy: { title: 'Too many requests right now.', hint: 'Wait a minute, then try again.' },
     server: { title: 'The viewer ran into a problem.', hint: 'Try again in a moment.' },
