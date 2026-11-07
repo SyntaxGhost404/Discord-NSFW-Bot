@@ -221,6 +221,61 @@ describe('xHamster galleries', () => {
   });
 });
 
+describe('xHamster through the relay', () => {
+  const RELAY = 'https://relay.example';
+  const relayEnv = { ASSETS: env.ASSETS, XH_RELAY_URL: RELAY, XH_RELAY_KEY: 'test-key' };
+  const getRelay = (path) => worker.fetch(new Request(`https://viewer.example${path}`), relayEnv);
+  const envelope = (body, init = {}) => new Response(JSON.stringify({
+    status: init.status ?? 200,
+    finalUrl: init.finalUrl ?? `${SITE}/photos`,
+    body,
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  function relaySite(respond) {
+    mock = installFetchMock([[`${RELAY}/*`, respond]]);
+    return mock.calls;
+  }
+
+  it('reads the feed through the relay, with the key', async () => {
+    const calls = relaySite(() => envelope(LIST));
+    const response = await getRelay('/api/xh/feed');
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`${RELAY}/fetch?u=${encodeURIComponent(`${SITE}/photos`)}`);
+    expect(calls[0].headers['x-relay-key']).toBe('test-key');
+    const body = await response.json();
+    expect(body).toMatchObject({ state: 'ok', items: [{ slug: 'first-gallery-101' }, { slug: 'second-gallery-102' }] });
+  });
+
+  it('passes on the status the relay reports', async () => {
+    relaySite(() => envelope('Service Temporarily Unavailable', { status: 503 }));
+    const response = await getRelay('/api/xh/feed');
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: 'upstream', upstream: 503 });
+  });
+
+  it('reads a gallery through the relay', async () => {
+    const KEY = 'blonde-in-a-red-dress-16612090';
+    relaySite(() => envelope(xhGalleryPage({ key: KEY, title: 'Blonde in a red dress', count: 3, pages: 1, photos: [xhPhoto(1)] }), { finalUrl: `${SITE}/photos/gallery/${KEY}` }));
+    const body = await (await getRelay(`/api/xh/album/${KEY}`)).json();
+    expect(body).toMatchObject({ slug: KEY, title: 'Blonde in a red dress', photos: [{ src: `${XH_IMAGE}/1_1000.jpg` }] });
+  });
+
+  it('falls back to asking the site directly when the relay is down', async () => {
+    mock = installFetchMock([
+      [`${RELAY}/*`, () => new Response('relay down', { status: 502 })],
+      [`${SITE}/*`, () => html(LIST)],
+    ]);
+    const response = await getRelay('/api/xh/feed');
+    expect(response.status).toBe(200);
+    expect(mock.calls.map((call) => call.url)).toEqual([
+      `${RELAY}/fetch?u=${encodeURIComponent(`${SITE}/photos`)}`,
+      `${SITE}/photos`,
+    ]);
+    expect(await response.json()).toMatchObject({ state: 'ok' });
+  });
+});
+
 describe('reading xHamster pages', () => {
   it('reads the data a page carries for its scripts, and nothing else', () => {
     expect(readInitials('<script>window.initials = {"a":"b\\/c"};</script>')).toEqual({ a: 'b/c' });

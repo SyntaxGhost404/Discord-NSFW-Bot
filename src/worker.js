@@ -47,6 +47,21 @@ const XH_HEADERS = Object.freeze({
 const HCX = Object.freeze({ headers: UPSTREAM_HEADERS, accepts: (host) => host === SOURCE_HOST });
 const XH = Object.freeze({ headers: XH_HEADERS, accepts: (host) => host === XH_HOST || host.endsWith(`.${XH_HOST}`) });
 const UPSTREAM_TIMEOUT_MS = 9_000;
+const RELAY_TIMEOUT_MS = 45_000;
+
+// xHamster refuses requests from this Worker's own network addresses, so
+// when a relay is configured (the XH_RELAY_URL and XH_RELAY_KEY secrets),
+// its pages are fetched through the relay instead: a small service on an
+// ordinary network that answers with the page's status, final address and
+// text as JSON. If the relay itself cannot be reached, the direct fetch is
+// tried, so the viewer works again on its own if xHamster ever answers
+// the Worker directly.
+function relayConfig(env) {
+  const base = env?.XH_RELAY_URL;
+  const key = env?.XH_RELAY_KEY;
+  if (typeof base !== 'string' || typeof key !== 'string' || !base || !key) return null;
+  return { base: base.replace(/\/+$/, ''), key };
+}
 // Seconds that browsers and Cloudflare may reuse an answer. A page the site
 // says it does not have is kept only briefly, so a passing problem on the
 // site never sticks.
@@ -98,7 +113,48 @@ function json(body, status = 200, ttl = 0, extra = {}) {
   });
 }
 
-async function upstream(url, ttl, site = HCX) {
+// The relay's answer, read the same way as a direct answer. Returns the
+// page text, throws the same HttpErrors as the direct fetch, or returns
+// null when the relay itself failed, so the caller falls back to asking
+// the site directly.
+async function upstreamViaRelay(url, site, relay) {
+  let data;
+  try {
+    const response = await fetch(`${relay.base}/fetch?u=${encodeURIComponent(url)}`, {
+      // The skip header keeps a tunnel provider's browser-warning page out
+      // of the relay's answers; it means nothing to the relay itself.
+      headers: { 'x-relay-key': relay.key, 'ngrok-skip-browser-warning': '1' },
+      signal: AbortSignal.timeout(RELAY_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    data = await response.json();
+  } catch {
+    return null;
+  }
+  if (!data || typeof data.status !== 'number' || typeof data.body !== 'string') return null;
+  const { status } = data;
+  if (status === 0) throw new HttpError(504, 'unreachable');
+  let finalHost;
+  try {
+    finalHost = new URL(data.finalUrl || url).hostname;
+  } catch {
+    return null;
+  }
+  if (!site.accepts(finalHost)) throw new HttpError(502, 'moved');
+  if (status === 404 || status === 410) throw new HttpError(404, 'not_found');
+  if (status < 200 || status >= 300) {
+    console.warn(JSON.stringify({ message: 'Upstream error.', url, status, server: 'relay', ray: null, mitigated: null, type: null, page: data.body.replace(/\s+/g, ' ').slice(0, 300) }));
+    const blocked = status === 403 || status === 429;
+    throw new HttpError(502, blocked ? 'blocked' : status === 451 ? 'unavailable' : 'upstream', { upstream: status });
+  }
+  return data.body;
+}
+
+async function upstream(url, ttl, site = HCX, relay = null) {
+  if (relay) {
+    const html = await upstreamViaRelay(url, site, relay);
+    if (html !== null) return html;
+  }
   let response;
   try {
     response = await fetch(url, {
@@ -173,10 +229,10 @@ async function listing(source, page, kind) {
 
 // The same states for xHamster. It answers a search without results with
 // "not found" and an empty list, and a page past the last with "not found".
-async function xhListing(source, page, kind) {
+async function xhListing(source, page, kind, relay = null) {
   let html;
   try {
-    html = await upstream(source, LIST_TTL, XH);
+    html = await upstream(source, LIST_TTL, XH, relay);
   } catch (error) {
     if (!(error instanceof HttpError) || error.status !== 404) throw error;
     const state = page > 1 ? 'end' : kind === 'search' ? 'empty' : 'missing';
@@ -198,7 +254,7 @@ function unreadable(kind, slug) {
   throw new HttpError(502, 'unreadable');
 }
 
-async function xhRoute(url) {
+async function xhRoute(url, relay = null) {
   const { pathname } = url;
   if (pathname === '/api/xh/feed') {
     const sort = url.searchParams.get('sort') || 'best';
@@ -209,13 +265,13 @@ async function xhRoute(url) {
     const page = pageOf(url);
     // A Top list is a single page.
     if (XH_SORTS[sort].ranked && page > 1) return listAnswer({ page, items: [], more: false, total: null, state: 'end', limited: false });
-    return xhListing(xhFeedUrl(sort, range, page), page, 'feed');
+    return xhListing(xhFeedUrl(sort, range, page), page, 'feed', relay);
   }
   if (pathname === '/api/xh/search') {
     const query = normalizeQuery(url.searchParams.get('q'));
     if (!query) throw new HttpError(400, 'bad_query');
     const page = pageOf(url);
-    return xhListing(xhSearchUrl(query, page), page, 'search');
+    return xhListing(xhSearchUrl(query, page), page, 'search', relay);
   }
   const album = pathname.match(/^\/api\/xh\/album\/([^/]+)$/);
   if (album) {
@@ -223,7 +279,7 @@ async function xhRoute(url) {
     if (!isGalleryKey(key)) throw new HttpError(400, 'bad_slug');
     const page = pageOf(url);
     if (page > 1 && !isNamedGallery(key)) throw new HttpError(400, 'bad_page');
-    const gallery = parseXhGallery(await upstream(xhGalleryUrl(key, page), ITEM_TTL, XH));
+    const gallery = parseXhGallery(await upstream(xhGalleryUrl(key, page), ITEM_TTL, XH, relay));
     if (!gallery) unreadable('xh album', key);
     // Past the last page the site shows another page of the gallery.
     if (gallery.page !== page) return json({ slug: key, ...gallery, page, photos: [] }, 200, ITEM_TTL);
@@ -232,9 +288,9 @@ async function xhRoute(url) {
   throw new HttpError(404, 'not_found');
 }
 
-async function route(url) {
+async function route(url, relay = null) {
   const { pathname } = url;
-  if (pathname.startsWith('/api/xh/')) return xhRoute(url);
+  if (pathname.startsWith('/api/xh/')) return xhRoute(url, relay);
   if (pathname === '/api/feed') {
     const sort = url.searchParams.get('sort') || 'recent';
     if (!Object.hasOwn(SORTS, sort)) throw new HttpError(400, 'bad_sort');
@@ -274,7 +330,7 @@ export default {
       return json({ error: 'method_not_allowed' }, 405, 0, { Allow: 'GET, HEAD' });
     }
     try {
-      return await route(url);
+      return await route(url, relayConfig(env));
     } catch (error) {
       if (error instanceof HttpError) return json({ error: error.code, ...error.detail }, error.status);
       console.error(JSON.stringify({ message: 'Unexpected API error.', path: url.pathname, error: String(error?.stack ?? error) }));
