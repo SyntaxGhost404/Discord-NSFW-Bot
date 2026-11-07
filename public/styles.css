@@ -1,0 +1,738 @@
+/* An Onyx-inspired dark theme: a near-black background, neutral surfaces a
+   few steps apart, white for the primary action, and one green accent for
+   focus. No shadows, glows, or blur; surfaces sit flat on the background.
+   Every container uses continuous-curvature corners ("sq"), sized by --r. */
+
+:root {
+  color-scheme: dark;
+  --bg: #060607;
+  --surface-1: #0f0f11;
+  --surface-2: #17171a;
+  --surface-3: #202024;
+  --surface-4: #2b2b30;
+  --line: #1d1d21;
+  --text-1: #f1f2f4;
+  --text-2: #b4b7be;
+  --text-3: #7d818a;
+  --accent: #46d184;
+  --danger: #f0544f;
+  --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* A native squircle corner bends less than the clip path drawn by
+     squircle.js, so it needs a larger radius to look the same. At 1.75 both
+     cut away the same area at every radius (measured in Chromium). */
+  --k: 1.75;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+img {
+  display: block;
+  -webkit-user-drag: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.icon {
+  display: block;
+  flex: none;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.noscript {
+  margin: 40px 24px;
+  color: var(--text-2);
+  text-align: center;
+}
+
+/* Continuous-curvature corners. Without native support, squircle.js clips
+   each element to the same shape; this radius only shows until it does. */
+.sq {
+  border-radius: var(--r, 0px);
+}
+
+@supports (corner-shape: squircle) {
+  .sq {
+    corner-shape: squircle;
+    border-radius: calc(var(--r, 0px) * var(--k));
+  }
+}
+
+/* Page */
+
+.page {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: calc(var(--safe-top) + 20px) 16px calc(var(--safe-bottom) + 32px);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mark {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--text-1);
+  color: var(--bg);
+  --r: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.intro {
+  margin: 10px 0 16px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.footer {
+  margin-top: 28px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Search */
+
+.search {
+  display: flex;
+  gap: 8px;
+}
+
+.search-field {
+  flex: 1;
+  min-width: 0;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 0 16px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  --r: 16px;
+}
+
+.search-field:focus-within {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 16px;
+}
+
+.search-input:focus-visible {
+  box-shadow: none;
+}
+
+.search-input::placeholder {
+  color: var(--text-3);
+  font-family: var(--font);
+}
+
+.search-clear {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+}
+
+@media (max-width: 479px) {
+  .search-go {
+    width: 52px;
+    padding: 0;
+  }
+
+  .search-go .btn-label {
+    display: none;
+  }
+}
+
+/* Buttons */
+
+.btn {
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border: 0;
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  --r: 13px;
+}
+
+.btn:active {
+  background: var(--surface-4);
+}
+
+.btn-primary {
+  height: 52px;
+  flex: none;
+  padding: 0 20px;
+  background: var(--text-1);
+  color: #000000;
+  font-size: 15px;
+  --r: 16px;
+}
+
+.btn-primary:active {
+  background: var(--text-2);
+}
+
+.btn-small {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+  --r: 12px;
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: var(--surface-2);
+  color: var(--text-2);
+  --r: 10px;
+}
+
+.icon-btn.small {
+  width: 28px;
+  height: 28px;
+  --r: 9px;
+}
+
+.icon-btn:active {
+  background: var(--surface-3);
+}
+
+/* Results */
+
+.result {
+  margin-top: 20px;
+}
+
+.notice {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  --r: 18px;
+}
+
+.notice > .icon {
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+.notice-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.notice-title {
+  margin: 0;
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.notice-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.notice .btn {
+  margin-top: 8px;
+}
+
+.profile {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.profile-head {
+  overflow: hidden;
+  background: var(--surface-1);
+  --r: 22px;
+}
+
+.banner {
+  aspect-ratio: 5 / 2;
+  background: var(--surface-3);
+}
+
+.banner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.identity {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: -44px;
+  padding: 0 16px;
+}
+
+.identity:last-child {
+  padding-bottom: 16px;
+}
+
+/* The frame takes the surface color, so the avatar seems cut out of the
+   banner. */
+.avatar-frame {
+  width: 104px;
+  height: 104px;
+  flex: none;
+  padding: 6px;
+  background: var(--surface-1);
+  --r: 30px;
+}
+
+.avatar {
+  width: 92px;
+  height: 92px;
+  object-fit: cover;
+  background: var(--surface-3);
+  --r: 26px;
+}
+
+.names {
+  min-width: 0;
+  padding-bottom: 6px;
+}
+
+.display-name {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.handle {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 14px 16px 16px;
+}
+
+.chip {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 600;
+  --r: 10px;
+}
+
+.chip-image {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.panel {
+  padding: 14px 16px 6px;
+  background: var(--surface-1);
+  --r: 20px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rows {
+  margin: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(92px, 32%) 1fr;
+  align-items: start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.row:first-child {
+  border-top: 0;
+}
+
+.row dt {
+  padding-top: 4px;
+  color: var(--text-3);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.row dd {
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-3);
+}
+
+.stack {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.line {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  --r: 7px;
+}
+
+.flag-list {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.row.media {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.row.media dt {
+  padding-top: 0;
+}
+
+.image-cell {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+/* A banner gets the panel's full width, with its details below. */
+.image-cell.wide {
+  flex-direction: column;
+}
+
+.image-cell.wide .thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 5 / 2;
+  --r: 14px;
+}
+
+.thumb {
+  width: 64px;
+  height: 64px;
+  flex: none;
+  overflow: hidden;
+  background: var(--surface-3);
+  --r: 16px;
+}
+
+.thumb.wide {
+  width: 120px;
+  height: 48px;
+  --r: 12px;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 9px;
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  --r: 9px;
+}
+
+.file:active {
+  background: var(--surface-3);
+}
+
+.raw summary {
+  margin: 0;
+  padding: 0 0 10px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.raw summary::-webkit-details-marker {
+  display: none;
+}
+
+.raw[open] summary .icon:last-child {
+  transform: rotate(90deg);
+}
+
+.raw-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.code {
+  width: 100%;
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  --r: 14px;
+}
+
+.fetched {
+  margin: 2px 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* Loading */
+
+.skeleton .banner,
+.skeleton .block,
+.skeleton .line-block {
+  animation: pulse 1.2s ease-in-out infinite alternate;
+}
+
+.skeleton .identity {
+  padding-bottom: 16px;
+}
+
+.line-block {
+  width: 160px;
+  height: 18px;
+  margin-top: 6px;
+  background: var(--surface-3);
+  --r: 6px;
+}
+
+.line-block.short {
+  width: 100px;
+  height: 14px;
+}
+
+.skeleton .panel.block {
+  height: 180px;
+}
+
+.skeleton .panel.block.tall {
+  height: 260px;
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.55;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton * {
+    animation: none !important;
+  }
+}
+
+@media (min-width: 640px) {
+  .page {
+    padding-top: calc(var(--safe-top) + 36px);
+  }
+
+  .identity {
+    margin-top: -52px;
+  }
+
+  .avatar-frame {
+    width: 120px;
+    height: 120px;
+    --r: 34px;
+  }
+
+  .avatar {
+    width: 108px;
+    height: 108px;
+    --r: 30px;
+  }
+}

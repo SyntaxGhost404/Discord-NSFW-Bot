@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Secrets and local configuration
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.local
+
+# Wrangler and build output
+.wrangler/
+dist/
+coverage/
+.cache/
+*.log
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
